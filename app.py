@@ -262,7 +262,6 @@ def render_practice():
         st.progress((idx) / len(cards))
         st.caption(f"測驗進度: {idx + 1} / {len(cards)}")
     
-    # 🎨 注入全新的精美單字卡 CSS (強制柔和白底 + 高對比字體)
     st.markdown("""
         <style>
         .flashcard-container {
@@ -316,15 +315,13 @@ def render_practice():
         </style>
     """, unsafe_allow_html=True)
     
-    # 組合卡片正面的 HTML
-    front_html = f"""
-    <div class="flashcard-container">
-        <div class="word-text">{card['Word']}</div>
-        <div class="phonetic-text">{card['Phonetic']}</div>
-    """
+    # 組合卡片正面的 HTML (注意：這裡刻意不縮排，防止 Markdown 誤判)
+    front_html = f"""<div class="flashcard-container">
+<div class="word-text">{card['Word']}</div>
+<div class="phonetic-text">{card['Phonetic']}</div>
+"""
     
     if st.session_state.is_front:
-        # 顯示正面
         front_html += "</div>"
         st.markdown(front_html, unsafe_allow_html=True)
         
@@ -332,28 +329,32 @@ def render_practice():
         if st.button("🔊 讀單字", use_container_width=True):
             play_audio(card['Word'])
             
-        st.write("") # 空行微調間距
+        st.write("") 
         if st.button("👁️ 翻轉卡片看解答", type="primary", use_container_width=True):
             st.session_state.is_front = False
             st.rerun()
             
     else:
-        # 顯示背面 (將正面的 HTML 加上背面的 HTML，確保在同一個白底框框內)
-        back_html = front_html + f"""
-            <div class="divider"></div>
-            <div class="def-text"><strong>[{card['POS']}]</strong> {card['Definition']}</div>
-            <div class="example-text">{card['Example']}</div>
-            <div class="trans-text">{card['Translation']}</div>
-        </div>
-        """
+        # 顯示背面 (刻意不縮排)
+        back_html = front_html + f"""<div class="divider"></div>
+<div class="def-text"><strong>[{card['POS']}]</strong> {card['Definition']}</div>
+<div class="example-text">{card['Example']}</div>
+<div class="trans-text">{card['Translation']}</div>
+</div>
+"""
         st.markdown(back_html, unsafe_allow_html=True)
         
-        # 背面語音按鈕排排站
-        col_audio1, col_audio2 = st.columns(2)
+        # 背面語音按鈕排排站 (改成 3 欄)
+        col_audio1, col_audio2, col_audio3 = st.columns(3)
         with col_audio1:
             if st.button("🔊 讀單字", use_container_width=True):
                 play_audio(card['Word'])
         with col_audio2:
+            if st.button("🔊 讀說明", use_container_width=True):
+                # 聰明小設計：只擷取斜線 "/" 前面的純英文釋義，避免發音引擎唸中文卡住
+                english_def = card['Definition'].split('/')[0].strip()
+                play_audio(english_def)
+        with col_audio3:
             if st.button("🔊 讀例句", use_container_width=True):
                 play_audio(card['Example'])
                 
