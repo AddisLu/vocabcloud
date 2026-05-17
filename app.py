@@ -238,7 +238,7 @@ def render_menu():
                     st.rerun()
 
 # ==========================================
-# 7. 測驗介面 (Practice UI)
+# 7. 測驗介面 (Practice UI) - 手機完美適應版
 # ==========================================
 def render_practice():
     cards = st.session_state.practice_cards
@@ -247,64 +247,128 @@ def render_practice():
     if idx >= len(cards):
         st.balloons()
         st.success("🎉 太棒了！你已經完成這組單字的複習！")
-        if st.button("返回主選單"):
+        if st.button("返回主選單", use_container_width=True):
             go_to_menu()
             st.rerun()
         return
 
     card = cards[idx]
     
-    st.button("⬅️ 中斷並返回首頁", on_click=go_to_menu)
-    st.progress((idx) / len(cards))
-    st.write(f"**進度:** {idx + 1} / {len(cards)}")
+    # 頂部導航列
+    col_back, col_prog = st.columns([1, 2])
+    with col_back:
+        st.button("⬅️ 返回首頁", on_click=go_to_menu, use_container_width=True)
+    with col_prog:
+        st.progress((idx) / len(cards))
+        st.caption(f"測驗進度: {idx + 1} / {len(cards)}")
     
+    # 🎨 注入全新的精美單字卡 CSS (強制柔和白底 + 高對比字體)
     st.markdown("""
         <style>
-        .flashcard {
-            background-color: white;
-            padding: 30px;
-            border-radius: 15px;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        .flashcard-container {
+            background-color: #f8f9fa; 
+            padding: 40px 20px;
+            border-radius: 20px;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.15);
             text-align: center;
+            margin: 10px 0 25px 0;
+            border: 1px solid #e5e7eb;
+        }
+        .word-text {
+            color: #111827; 
+            font-size: 3.2rem;
+            font-weight: 800;
+            margin-bottom: 5px;
+            line-height: 1.2;
+        }
+        .phonetic-text {
+            color: #6b7280;
+            font-size: 1.3rem;
             margin-bottom: 20px;
+            font-family: monospace;
+        }
+        .def-text {
+            color: #374151;
+            font-size: 1.3rem;
+            margin-top: 20px;
+            line-height: 1.5;
+        }
+        .example-text {
+            color: #2563eb; 
+            font-size: 1.1rem;
+            font-style: italic;
+            margin-top: 15px;
+            line-height: 1.4;
+            padding: 10px;
+            background-color: #eff6ff;
+            border-radius: 10px;
+        }
+        .trans-text {
+            color: #059669; 
+            font-size: 1.15rem;
+            margin-top: 15px;
+            font-weight: 500;
+        }
+        .divider {
+            margin: 20px 0;
+            border-top: 2px dashed #d1d5db;
         }
         </style>
     """, unsafe_allow_html=True)
     
-    with st.container():
-        st.markdown('<div class="flashcard">', unsafe_allow_html=True)
-        st.markdown(f"<h1 style='color: #002147; font-size: 3rem;'>{card['Word']}</h1>", unsafe_allow_html=True)
-        st.markdown(f"<p style='color: gray; font-size: 1.2rem;'>{card['Phonetic']}</p>", unsafe_allow_html=True)
-        
-        if st.button("🔊 讀單字", key=f"speak_word_{idx}"):
-            play_audio(card['Word'])
-        
-        if not st.session_state.is_front:
-            st.markdown("---")
-            st.markdown(f"<p style='font-size: 1.2rem;'><strong>[{card['POS']}]</strong> {card['Definition']}</p>", unsafe_allow_html=True)
-            st.markdown(f"<p style='color: #1f77b4; font-size: 1.1rem; font-style: italic;'>{card['Example']}</p>", unsafe_allow_html=True)
-            
-            if st.button("🔊 讀例句", key=f"speak_ex_{idx}"):
-                play_audio(card['Example'])
-                
-            st.markdown(f"<p style='color: #2ca02c; font-size: 1.1rem;'>{card['Translation']}</p>", unsafe_allow_html=True)
-            
-        st.markdown('</div>', unsafe_allow_html=True)
+    # 組合卡片正面的 HTML
+    front_html = f"""
+    <div class="flashcard-container">
+        <div class="word-text">{card['Word']}</div>
+        <div class="phonetic-text">{card['Phonetic']}</div>
+    """
     
     if st.session_state.is_front:
-        if st.button("👁️ 翻轉卡片看解答", use_container_width=True):
+        # 顯示正面
+        front_html += "</div>"
+        st.markdown(front_html, unsafe_allow_html=True)
+        
+        # 正面按鈕區
+        if st.button("🔊 讀單字", use_container_width=True):
+            play_audio(card['Word'])
+            
+        st.write("") # 空行微調間距
+        if st.button("👁️ 翻轉卡片看解答", type="primary", use_container_width=True):
             st.session_state.is_front = False
             st.rerun()
+            
     else:
-        col1, col2 = st.columns(2)
-        with col1:
+        # 顯示背面 (將正面的 HTML 加上背面的 HTML，確保在同一個白底框框內)
+        back_html = front_html + f"""
+            <div class="divider"></div>
+            <div class="def-text"><strong>[{card['POS']}]</strong> {card['Definition']}</div>
+            <div class="example-text">{card['Example']}</div>
+            <div class="trans-text">{card['Translation']}</div>
+        </div>
+        """
+        st.markdown(back_html, unsafe_allow_html=True)
+        
+        # 背面語音按鈕排排站
+        col_audio1, col_audio2 = st.columns(2)
+        with col_audio1:
+            if st.button("🔊 讀單字", use_container_width=True):
+                play_audio(card['Word'])
+        with col_audio2:
+            if st.button("🔊 讀例句", use_container_width=True):
+                play_audio(card['Example'])
+                
+        st.write("---")
+        
+        # 對錯判定按鈕區
+        col_ans1, col_ans2 = st.columns(2)
+        with col_ans1:
             if st.button("✅ 記得了", type="primary", use_container_width=True):
                 update_score_in_sheets(card['Word'], is_correct=True)
                 st.session_state.current_index += 1
                 st.session_state.is_front = True
                 st.rerun()
-        with col2:
-            if st.button("❌ 答錯了", type="secondary", use_container_width=True):
+        with col_ans2:
+            if st.button("❌ 答錯了", use_container_width=True):
                 update_score_in_sheets(card['Word'], is_correct=False)
                 st.session_state.current_index += 1
                 st.session_state.is_front = True
