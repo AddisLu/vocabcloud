@@ -1,0 +1,6 @@
+streamlit
+gspread
+google-auth
+gTTS
+google-genai
+pandas
