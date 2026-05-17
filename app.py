@@ -65,10 +65,10 @@ def play_audio(text):
         st.error(f"語音生成失敗: {e}")
 
 # ==========================================
-# 4. 🚀 核心升級：資料庫整理與 SRS 演算法
+# 4. 🚀 核心升級：防彈版資料庫整理與 SRS 演算法
 # ==========================================
 def fetch_and_clean_data():
-    """讀取資料庫並自動修補舊單字的缺漏欄位"""
+    """讀取資料庫，並加上『防彈機制』避免空白或格式錯誤"""
     sheet = get_sheet()
     records = sheet.get_all_records()
     df = pd.DataFrame(records)
@@ -76,47 +76,65 @@ def fetch_and_clean_data():
     if df.empty:
         return df
 
+    # 1. 清理標題列的無形空白 (解決不小心打成 "Level " 的問題)
+    df.columns = df.columns.str.strip()
+
     today_str = date.today().isoformat()
-    # 自動補齊舊資料缺少的欄位
-    if 'Tag' not in df.columns: df['Tag'] = "未分類"
-    if 'Level' not in df.columns: df['Level'] = 0
-    if 'Next_Review' not in df.columns: df['Next_Review'] = today_str
-    if 'Created_At' not in df.columns: df['Created_At'] = today_str
     
-    # 填補空值
-    df['Tag'] = df['Tag'].replace('', '未分類')
-    df['Level'] = pd.to_numeric(df['Level'].replace('', 0)).fillna(0).astype(int)
-    df['Next_Review'] = df['Next_Review'].replace('', today_str)
-    df['Created_At'] = df['Created_At'].replace('', today_str)
+    # 2. 確保所有必備欄位都在，沒有就補上空字串
+    for col in ['Tag', 'Level', 'Next_Review', 'Created_At']:
+        if col not in df.columns:
+            df[col] = ''
+            
+    # 3. 防彈轉型 (自動把奇怪的字元轉成預設值，不怕讀到錯位的資料)
+    df['Tag'] = df['Tag'].fillna('未分類').astype(str).replace(r'^\s*$', '未分類', regex=True)
+    df['Level'] = pd.to_numeric(df['Level'], errors='coerce').fillna(0).astype(int)
+    df['Next_Review'] = df['Next_Review'].fillna(today_str).astype(str).replace(r'^\s*$', today_str, regex=True)
+    df['Created_At'] = df['Created_At'].fillna(today_str).astype(str).replace(r'^\s*$', today_str, regex=True)
     
     return df
 
+def safe_int(val):
+    """安全地將儲存格內容轉為整數"""
+    try:
+        return int(str(val).strip())
+    except (ValueError, TypeError):
+        return 0
+
 def update_score_in_sheets(word, is_correct):
-    """結合 SRS 間隔重複演算法的分數更新"""
+    """結合 SRS 演算法，並使用『動態尋找欄位』避免寫錯格"""
     try:
         sheet = get_sheet()
+        # 抓取第一列標題，用來動態定位 (不怕欄位被移動或插隊)
+        headers = [str(h).strip() for h in sheet.row_values(1)]
+        
+        # 找出真正對應欄位的行號 (Google Sheet 是從 1 開始算)
+        col_correct = headers.index('Correct') + 1 if 'Correct' in headers else 7
+        col_wrong = headers.index('Wrong') + 1 if 'Wrong' in headers else 8
+        col_level = headers.index('Level') + 1 if 'Level' in headers else 11
+        col_next = headers.index('Next_Review') + 1 if 'Next_Review' in headers else 12
+
         cell = sheet.find(word)
         if cell:
             row = cell.row
-            current_correct = int(sheet.cell(row, 7).value or 0)
-            current_wrong = int(sheet.cell(row, 8).value or 0)
-            current_level = int(sheet.cell(row, 11).value or 0)
+            curr_correct = safe_int(sheet.cell(row, col_correct).value)
+            curr_wrong = safe_int(sheet.cell(row, col_wrong).value)
+            curr_level = safe_int(sheet.cell(row, col_level).value)
             
             today = date.today()
             
             if is_correct:
-                # 答對：Level 提升，下次複習時間拉長 (1天, 2天, 4天, 8天...)
-                sheet.update_cell(row, 7, current_correct + 1)
-                new_level = current_level + 1
-                days_to_add = 2 ** (new_level - 1) if new_level <= 5 else 30
-                next_review = today + timedelta(days=days_to_add)
-                sheet.update_cell(row, 11, new_level)
-                sheet.update_cell(row, 12, next_review.isoformat())
+                new_level = curr_level + 1
+                days = 2 ** (new_level - 1) if new_level <= 5 else 30
+                next_review = (today + timedelta(days=days)).isoformat()
+                
+                sheet.update_cell(row, col_correct, curr_correct + 1)
+                sheet.update_cell(row, col_level, new_level)
+                sheet.update_cell(row, col_next, next_review)
             else:
-                # 答錯：Level 歸零，明天立刻複習
-                sheet.update_cell(row, 8, current_wrong + 1)
-                sheet.update_cell(row, 11, 0)
-                sheet.update_cell(row, 12, today.isoformat())
+                sheet.update_cell(row, col_wrong, curr_wrong + 1)
+                sheet.update_cell(row, col_level, 0)
+                sheet.update_cell(row, col_next, today.isoformat())
     except Exception as e:
         print(f"分數與 SRS 更新失敗: {e}")
 
