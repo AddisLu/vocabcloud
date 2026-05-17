@@ -205,6 +205,12 @@ def render_menu():
             run_ai_import(status_ph, prog_bar)
             time.sleep(2)
             st.rerun()
+    
+    st.write("---")
+    st.subheader("➕ 新增單字")
+    if st.button("✨ AI 查字典並加入字庫", use_container_width=True):
+        st.session_state.page = 'add_word'
+        st.rerun()
 
     st.write("---")
     st.subheader("🎯 開始練習")
@@ -391,9 +397,58 @@ def update_score_in_sheets(word, is_correct):
         print(f"分數更新失敗: {e}")
 
 # ==========================================
+# 7.5 新增單字介面 (AI 查字典)
+# ==========================================
+def render_add_word():
+    st.button("⬅️ 返回首頁", on_click=go_to_menu)
+    st.title("✨ AI 雲端查字典")
+    st.markdown("貼上你不認識的單字，AI 會幫你生成完美單字卡並自動歸檔！")
+    
+    new_word = st.text_input("請輸入或貼上單字/片語：", placeholder="例如：implement")
+    
+    if st.button("🚀 生成並寫入雲端字庫", type="primary", use_container_width=True):
+        if not new_word:
+            st.warning("請先輸入單字喔！")
+            return
+            
+        with st.spinner("AI 正在為您精準翻譯與造句..."):
+            try:
+                client = genai.Client(api_key=API_KEY)
+                prompt = f"""
+                請幫我查英文單字或片語：「{new_word}」。
+                請務必使用「簡單、常用且精簡」的文字來寫英文釋義與例句。
+                請嚴格依照以下格式輸出，不要有任何 Markdown 標記或其他廢話：
+                單字||KK音標||詞性||英文釋義 / 繁體中文釋義||簡單英文例句||例句繁體中文翻譯
+                """
+                
+                response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+                cleaned_line = response.text.strip().replace('`', '')
+                
+                parts = cleaned_line.split('||')
+                if len(parts) == 6:
+                    word, phonetic, pos, definition, example, translation = [p.strip() for p in parts]
+                    
+                    # 寫入 Google Sheets
+                    sheet = get_sheet()
+                    sheet.append_row([word, phonetic, pos, definition, example, translation, 0, 0, 1])
+                    
+                    st.success(f"✅ 成功將『{word}』加入字庫！")
+                    
+                    # 在畫面上預覽生成的結果
+                    st.info(f"**音標**: {phonetic}\n\n**釋義**: [{pos}] {definition}\n\n**例句**: {example}\n\n**翻譯**: {translation}")
+                else:
+                    st.error("AI 生成格式錯誤，請再試一次。")
+                    
+            except Exception as e:
+                st.error(f"發生錯誤：{e}")
+
+
+# ==========================================
 # 8. 路由導航
 # ==========================================
 if st.session_state.page == 'menu':
     render_menu()
 elif st.session_state.page == 'practice':
     render_practice()
+elif st.session_state.page == 'add_word':
+    render_add_word()
