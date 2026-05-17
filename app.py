@@ -1,13 +1,11 @@
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build # 新增：驅動雲端硬碟 API
 import json
 import pandas as pd
-import threading
 import time
 import re
-import os
-import glob
 from gtts import gTTS
 import io
 from google import genai
@@ -17,30 +15,32 @@ from google import genai
 # ==========================================
 st.set_page_config(page_title="VocabCloud 雲端單字系統", page_icon="☁️", layout="centered")
 
-# 將 Gemini API Key 放在這裡 (未來也可以移入 secrets.toml 中)
 API_KEY = "AIzaSyC6OeI7Xwsguyb4OpRtWiX2V0Fk-aRDXi4"
 
 # ==========================================
-# 2. 雲端資料庫 (Google Sheets) 連線模組
+# 2. 雲端認證與連線模組 (Google Sheets & Drive)
 # ==========================================
 @st.cache_resource
-def get_gspread_client():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+def get_gcp_credentials():
+    """取得統一的 GCP 服務帳號憑證"""
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
     gcp_json_str = st.secrets["gcp_service_account"]["json_key"]
     gcp_info = json.loads(gcp_json_str)
-    creds = Credentials.from_service_account_info(gcp_info, scopes=scope)
-    return gspread.authorize(creds)
+    return Credentials.from_service_account_info(gcp_info, scopes=scope)
 
 def get_sheet():
-    client = get_gspread_client()
+    creds = get_gcp_credentials()
+    client = gspread.authorize(creds)
     return client.open("VocabCloud_DB").sheet1
 
 # ==========================================
-# 3. 狀態管理 (Session State) 
-# 用來記住畫面切換與翻卡片的狀態
+# 3. 狀態管理 (Session State)
 # ==========================================
 if 'page' not in st.session_state:
-    st.session_state.page = 'menu' # 'menu' 或 'practice'
+    st.session_state.page = 'menu'
 if 'practice_cards' not in st.session_state:
     st.session_state.practice_cards = []
 if 'current_index' not in st.session_state:
@@ -53,43 +53,34 @@ def go_to_menu():
     st.session_state.practice_cards = []
     
 # ==========================================
-# 4. 語音發聲模組 (適用於瀏覽器)
+# 4. 跨平台網頁語音發聲模組
 # ==========================================
 def play_audio(text):
-    """在記憶體中生成 mp3 並使用 Streamlit 的音訊播放器展現"""
     if not text: return
     try:
         tts = gTTS(text=text, lang='en')
         fp = io.BytesIO()
         tts.write_to_fp(fp)
         fp.seek(0)
-        # st.audio 支援直接讀取 BytesIO，autoplay=True 可以在點擊按鈕後自動播放 (需 Streamlit 1.33+)
         st.audio(fp, format="audio/mp3", autoplay=True)
     except Exception as e:
         st.error(f"語音生成失敗: {e}")
 
 # ==========================================
-# 5. 背景管線邏輯 (同步與 AI 生成)
+# 5. 🚀 升級：全雲端 Google Drive 同步管線
 # ==========================================
-def sync_drive_to_sheets():
-    # 這裡的邏輯只在你在自己 Mac 上跑 Localhost 時有效
-    # 未來若部署到雲端主機，需要改用 Google Drive API
-    cloud_storage = os.path.expanduser("~/Library/CloudStorage")
-    possible_drives = [os.path.join(cloud_storage, d) for d in os.listdir(cloud_storage) if "google" in d.lower()] if os.path.exists(cloud_storage) else []
-    target_folder = None
-    for drive in possible_drives:
-        for sub in ["My Drive", "我的雲端硬碟", ""]:
-            test_path = os.path.join(drive, sub, "VocabularyLog")
-            if os.path.exists(test_path):
-                target_folder = test_path
-                break
-        if target_folder: break
-
-    if not target_folder:
-        target_folder = os.path.expanduser("~/Desktop/VocabularyLog")
-
-    md_files = glob.glob(os.path.join(target_folder, "*.md"))
-    if not md_files:
+def sync_cloud_drive_to_sheets():
+    """直接透過 Google Drive API 讀取共用資料夾內的所有 Markdown 單字檔"""
+    creds = get_gcp_credentials()
+    # 建立雲端硬碟服務連結
+    drive_service = build('drive', 'v3', credentials=creds)
+    
+    # 搜尋服務帳號有權限讀取、且檔名包含 .md 的所有未刪除檔案
+    query = "name contains '.md' and trashed = false"
+    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    files = results.get('files', [])
+    
+    if not files:
         return 0
 
     sheet = get_sheet()
@@ -98,27 +89,31 @@ def sync_drive_to_sheets():
     
     added_count = 0
     new_rows = []
-    for file in md_files:
-        with open(file, 'r', encoding='utf-8') as f:
-            content = f.read()
-            blocks = content.split('---')
-            for block in blocks:
-                if not block.strip(): continue
-                try:
-                    word = re.search(r'###\s+(.*)', block).group(1).strip()
-                    if word.lower() in existing_words: continue # 防重複
-                    
-                    phonetic = re.search(r'\*\*\s*KK音標：\*\*\s*(.*)', block).group(1).strip() if re.search(r'\*\*\s*KK音標：\*\*\s*(.*)', block) else ""
-                    pos = re.search(r'\*\*\s*詞性：\*\*\s*(.*)', block).group(1).strip() if re.search(r'\*\*\s*詞性：\*\*\s*(.*)', block) else ""
-                    definition = re.search(r'\*\*\s*釋義：\*\*\s*(.*)', block).group(1).strip() if re.search(r'\*\*\s*釋義：\*\*\s*(.*)', block) else ""
-                    example = re.search(r'\*\*\s*例句：\*\*\s*(.*)', block).group(1).strip() if re.search(r'\*\*\s*例句：\*\*\s*(.*)', block) else ""
-                    translation = re.search(r'\*\*\s*翻譯：\*\*\s*(.*)', block).group(1).strip() if re.search(r'\*\*\s*翻譯：\*\*\s*(.*)', block) else ""
-                    
-                    new_rows.append([word, phonetic, pos, definition, example, translation, 0, 0, 2])
-                    existing_words.add(word.lower())
-                    added_count += 1
-                except AttributeError:
-                    continue
+    
+    for file in files:
+        file_id = file['id']
+        # 透過 API 跨雲端下載檔案文字內容
+        content_bytes = drive_service.files().get_media(fileId=file_id).execute()
+        content = content_bytes.decode('utf-8', errors='ignore')
+        
+        blocks = content.split('---')
+        for block in blocks:
+            if not block.strip(): continue
+            try:
+                word = re.search(r'###\s+(.*)', block).group(1).strip()
+                if word.lower() in existing_words: continue 
+                
+                phonetic = re.search(r'\*\*\s*KK音標：\*\*\s*(.*)', block).group(1).strip() if re.search(r'\*\*\s*KK音標：\*\*\s*(.*)', block) else ""
+                pos = re.search(r'\*\*\s*詞性：\*\*\s*(.*)', block).group(1).strip() if re.search(r'\*\*\s*詞性：\*\*\s*(.*)', block) else ""
+                definition = re.search(r'\*\*\s*釋義：\*\*\s*(.*)', block).group(1).strip() if re.search(r'\*\*\s*釋義：\*\*\s*(.*)', block) else ""
+                example = re.search(r'\*\*\s*例句：\*\*\s*(.*)', block).group(1).strip() if re.search(r'\*\*\s*例句：\*\*\s*(.*)', block) else ""
+                translation = re.search(r'\*\*\s*翻譯：\*\*\s*(.*)', block).group(1).strip() if re.search(r'\*\*\s*翻譯：\*\*\s*(.*)', block) else ""
+                
+                new_rows.append([word, phonetic, pos, definition, example, translation, 0, 0, 2])
+                existing_words.add(word.lower())
+                added_count += 1
+            except AttributeError:
+                continue
     
     if new_rows:
         sheet.append_rows(new_rows)
@@ -130,7 +125,7 @@ def run_ai_import(status_placeholder, progress_bar):
         "一般商務 (合約、談判、行銷)", "辦公室行政 (會議、內部溝通)",
         "財務與金融 (銀行、投資、稅務)", "採購與物料管理 (訂購、航運)",
         "人事與人力資源 (招聘、薪酬)"
-    ] # 為了網頁版示範，先跑 5 個主題，可自行擴充
+    ] 
     
     sheet = get_sheet()
     existing_records = sheet.get_all_records()
@@ -188,7 +183,7 @@ def render_menu():
         total_words = len(records)
         st.markdown(f"### 📊 目前雲端字庫總量: **{total_words}** 字")
     except Exception as e:
-        st.error("無法讀取資料庫，請檢查連線。")
+        st.error(f"無法讀取資料庫，請檢查連線。系統回報錯誤：{e}")
         return
 
     st.write("---")
@@ -196,11 +191,11 @@ def render_menu():
     
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("📂 從 Google Drive 同步日常單字", use_container_width=True):
-            with st.spinner("同步中..."):
-                count = sync_drive_to_sheets()
-                st.success(f"成功同步了 {count} 個單字！")
-                time.sleep(1)
+        if st.button("☁️ 從 Google Drive 同步日常單字", use_container_width=True):
+            with st.spinner("正在跨雲端安全檢索您的 Google Drive 檔案..."):
+                count = sync_cloud_drive_to_sheets()
+                st.success(f"成功將雲端硬碟中的 {count} 個日常單字同步至資料庫！")
+                time.sleep(1.5)
                 st.rerun()
                 
     with col2:
@@ -231,13 +226,11 @@ def render_menu():
                 
         with col4:
             if st.button("🚨 錯題特訓 (針對常錯單字)", use_container_width=True):
-                # 篩選出 Wrong_Count > 0 的單字
                 mistakes_df = df[df['Wrong_Count'] > 0]
                 if mistakes_df.empty:
                     st.success("太棒了！你目前沒有任何錯題紀錄！")
                 else:
                     sample_size = min(10, len(mistakes_df))
-                    # 依照錯題次數排序後抽取
                     st.session_state.practice_cards = mistakes_df.sort_values(by='Wrong_Count', ascending=False).head(sample_size).to_dict('records')
                     st.session_state.current_index = 0
                     st.session_state.is_front = True
@@ -265,7 +258,6 @@ def render_practice():
     st.progress((idx) / len(cards))
     st.write(f"**進度:** {idx + 1} / {len(cards)}")
     
-    # 繪製單字卡片的外觀
     st.markdown("""
         <style>
         .flashcard {
@@ -281,15 +273,12 @@ def render_practice():
     
     with st.container():
         st.markdown('<div class="flashcard">', unsafe_allow_html=True)
-        
-        # 正面
         st.markdown(f"<h1 style='color: #002147; font-size: 3rem;'>{card['Word']}</h1>", unsafe_allow_html=True)
         st.markdown(f"<p style='color: gray; font-size: 1.2rem;'>{card['Phonetic']}</p>", unsafe_allow_html=True)
         
         if st.button("🔊 讀單字", key=f"speak_word_{idx}"):
             play_audio(card['Word'])
         
-        # 背面 (翻轉後顯示)
         if not st.session_state.is_front:
             st.markdown("---")
             st.markdown(f"<p style='font-size: 1.2rem;'><strong>[{card['POS']}]</strong> {card['Definition']}</p>", unsafe_allow_html=True)
@@ -302,7 +291,6 @@ def render_practice():
             
         st.markdown('</div>', unsafe_allow_html=True)
     
-    # 操作按鈕邏輯
     if st.session_state.is_front:
         if st.button("👁️ 翻轉卡片看解答", use_container_width=True):
             st.session_state.is_front = False
@@ -323,19 +311,15 @@ def render_practice():
                 st.rerun()
 
 def update_score_in_sheets(word, is_correct):
-    """尋找對應的單字列並更新分數"""
     try:
         sheet = get_sheet()
-        # 尋找 Word 欄位 (預設第一欄) 中符合的字
         cell = sheet.find(word)
         if cell:
             row = cell.row
             if is_correct:
-                # Correct_Count 在第 7 欄
                 current_val = int(sheet.cell(row, 7).value or 0)
                 sheet.update_cell(row, 7, current_val + 1)
             else:
-                # Wrong_Count 在第 8 欄
                 current_val = int(sheet.cell(row, 8).value or 0)
                 sheet.update_cell(row, 8, current_val + 1)
     except Exception as e:
