@@ -15,7 +15,7 @@ from google import genai
 # ==========================================
 st.set_page_config(page_title="VocabCloud 雲端單字系統", page_icon="☁️", layout="centered")
 
-API_KEY = "AIzaSyC6OeI7Xwsguyb4OpRtWiX2V0Fk-aRDXi4"
+API_KEY = st.secrets["GEMINI_API_KEY"]
 
 # ==========================================
 # 2. 雲端認證與連線模組 (Google Sheets & Drive)
