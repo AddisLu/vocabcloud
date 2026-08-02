@@ -8,15 +8,14 @@ import time
 import re
 from gtts import gTTS
 import io
-from google import genai
 from datetime import datetime, timedelta, date
 
 # ==========================================
 # 1. 網頁初始化與全域設定
 # ==========================================
+# 註：本 app 不呼叫任何 AI API。單字的生成一律在本機用 Claude Code Max
+#     訂閱完成（見 ~/15min/vocab_builder.py），雲端只負責複習與同步。
 st.set_page_config(page_title="VocabCloud 雲端單字系統", page_icon="☁️", layout="centered")
-
-API_KEY = st.secrets["GEMINI_API_KEY"]
 
 # ==========================================
 # 2. 雲端認證與連線模組
@@ -177,68 +176,25 @@ def sync_cloud_drive_to_sheets():
     if new_rows: sheet.append_rows(new_rows)
     return added_count
 
-def run_ai_import(status_placeholder, progress_bar):
-    client = genai.Client(api_key=API_KEY)
-    toeic_themes = ["一般商務 (合約)", "辦公室行政", "財務與金融", "採購與物料管理", "人事與人力資源"] 
-    sheet = get_sheet()
-    existing_words = {str(row.get("Word", "")).strip().lower() for row in sheet.get_all_records()}
-    total_added, today_str = 0, date.today().isoformat()
-    
-    for index, theme in enumerate(toeic_themes):
-        status_placeholder.info(f"正在匯入主題 ({index+1}/{len(toeic_themes)}): {theme}...")
-        progress_bar.progress((index) / len(toeic_themes))
-        prompt = f"請針對多益核心單字「{theme}」主題，精選10個必考單字。格式：單字||KK音標||詞性||英文釋義 / 中文釋義||簡單例句||例句翻譯"
-        try:
-            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-            lines = response.text.strip().split('\n')
-            new_rows = []
-            for line in lines:
-                cleaned_line = re.sub(r'^(?:\d+\.\s*|-\s*|\*\s*|`\s*)', '', line.strip()).replace('`', '').strip()
-                if "||" not in cleaned_line: continue
-                parts = cleaned_line.split('||')
-                if len(parts) == 6:
-                    word, phonetic, pos, defs, ex, trans = [p.strip() for p in parts]
-                    if word.lower() not in existing_words:
-                        new_rows.append([word, phonetic, pos, defs, ex, trans, 0, 0, 1, theme, 0, today_str, today_str])
-                        existing_words.add(word.lower())
-                        total_added += 1
-            if new_rows: sheet.append_rows(new_rows)
-            time.sleep(2)
-        except Exception as e:
-            st.error(f"匯入失敗: {e}")
-            break
-    progress_bar.progress(1.0)
-    status_placeholder.success(f"✅ 成功灌入 {total_added} 個單字！")
-
 # ==========================================
-# 6. 新增單字介面 (AI 查字典)
+# 6. 新增單字說明頁
 # ==========================================
 def render_add_word():
     st.button("⬅️ 返回首頁", on_click=go_to_menu)
-    st.title("✨ AI 雲端查字典")
-    new_word = st.text_input("請輸入單字：", placeholder="例如：implement")
-    
-    if st.button("🚀 生成並寫入字庫", type="primary", use_container_width=True):
-        if not new_word:
-            st.warning("請先輸入單字！")
-            return
-        with st.spinner("AI 處理中..."):
-            try:
-                client = genai.Client(api_key=API_KEY)
-                prompt = f"查單字：「{new_word}」。格式：單字||KK音標||詞性||英文釋義 / 繁體中文釋義||簡單英文例句||例句繁體中文翻譯"
-                response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-                parts = response.text.strip().replace('`', '').split('||')
-                if len(parts) == 6:
-                    word, phonetic, pos, definition, example, translation = [p.strip() for p in parts]
-                    today_str = date.today().isoformat()
-                    sheet = get_sheet()
-                    sheet.append_row([word, phonetic, pos, definition, example, translation, 0, 0, 1, "手動查閱", 0, today_str, today_str])
-                    st.success(f"✅ 『{word}』加入成功！")
-                    st.info(f"**音標**: {phonetic}\n\n**釋義**: {definition}\n\n**例句**: {example}")
-                else:
-                    st.error("AI 格式錯誤。")
-            except Exception as e:
-                st.error(f"錯誤：{e}")
+    st.title("✏️ 怎麼新增單字")
+    st.info("單字的 AI 解釋一律在**你的 Mac** 上產生，用的是 Claude Code Max 訂閱，雲端這邊不需要任何 API Key。")
+
+    st.subheader("方法一：捷徑（日常用這個）")
+    st.markdown(
+        "在任何 App 選取英文單字 → 右鍵／分享選單執行「**英文練習**」捷徑。\n\n"
+        "成功會跳 macOS 通知，單字自動存進 Google Drive 的 `VocabularyLog`。"
+    )
+
+    st.subheader("方法二：終端機（一次補很多字）")
+    st.code('python3 ~/15min/vocab_builder.py "resilient"', language="bash")
+
+    st.subheader("最後一步")
+    st.markdown("回首頁按 **☁️ Drive 同步**，就會把新單字讀進字庫，然後就能開始複習了。")
 
 # ==========================================
 # 7. 主頁面 (多維度練習菜單)
@@ -258,7 +214,7 @@ def render_menu():
     st.subheader("🎯 智能特訓中心")
     
     if total_words == 0:
-        st.warning("⚠️ 庫存為空，請先同步或 AI 建立題庫。")
+        st.warning("⚠️ 庫存為空，請先在 Mac 上用捷徑存單字，再按下方的「☁️ Drive 同步」。")
     else:
         # 1. 📅 SRS 今日複習
         today_str = date.today().isoformat()
@@ -322,20 +278,21 @@ def render_menu():
 
     st.write("---")
     st.subheader("🔄 資料管線")
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
-        if st.button("✨ 查字典", use_container_width=True):
-            st.session_state.page = 'add_word'
+        if st.button("☁️ Drive 同步", type="primary", use_container_width=True):
+            with st.spinner("同步中..."):
+                added = sync_cloud_drive_to_sheets()
+            if added:
+                st.success(f"✅ 新增了 {added} 個單字！")
+                time.sleep(1.5)
+            else:
+                st.info("沒有新單字，字庫已是最新。")
+                time.sleep(1.5)
             st.rerun()
     with col2:
-        if st.button("☁️ Drive 同步", use_container_width=True):
-            with st.spinner("同步中..."):
-                sync_cloud_drive_to_sheets()
-                st.rerun()
-    with col3:
-        if st.button("🤖 擴充題庫", use_container_width=True):
-            ph, bar = st.empty(), st.progress(0)
-            run_ai_import(ph, bar)
+        if st.button("✏️ 怎麼新增單字", use_container_width=True):
+            st.session_state.page = 'add_word'
             st.rerun()
 
 # ==========================================
