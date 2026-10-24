@@ -658,10 +658,13 @@ class VocabWindow:
         play_pronunciation(self.word, self.info["audio_url"] if self.info else "")
 
     def on_add(self):
-        if not self.info:  # 查詢還沒完成：記住意圖，fill() 完成後自動加入
+        if not self.info:  # 查詢還沒完成：立刻關窗，fill() 完成後在背景自動加入
             self.pending_add = True
-            self.status_label.config(fg="#6b7280")
-            self.status_var.set("⏳ 查詢中，完成後自動加入…")
+            if self.oneshot:  # 一次性模式關窗=程式結束，只能留窗等
+                self.status_label.config(fg="#6b7280")
+                self.status_var.set("⏳ 查詢中，完成後自動加入…")
+            else:
+                self.dismiss()  # daemon 模式：視窗先收，結果看系統通知
             return
         ok, msg = add_to_log(self.info)
         notify("VocabCloud", msg)  # 系統通知：視窗關了也看得到
