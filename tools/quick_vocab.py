@@ -146,10 +146,85 @@ def local_lookup(word):
     return _row_to_info(row)
 
 
+def _phonetic_of(w):
+    try:
+        row = _get_ecdict_con().execute(
+            "SELECT phonetic FROM stardict WHERE word = ? COLLATE NOCASE", (w,)
+        ).fetchone()
+        return (row[0] or "").strip() if row else ""
+    except Exception:
+        return ""
+
+
+def _ed_sound(base):
+    if base.endswith(("t", "d")):
+        return "id"
+    return "t" if base[-1:] in "pkfsθʃ" else "d"
+
+
+def _s_sound(base):
+    if base[-1:] in "szʃʒ" or base.endswith("dʒ"):
+        return "iz"
+    return "s" if base[-1:] in "pktfθ" else "z"
+
+
+# 字尾 → 發音（不改變重音的字尾才放進來）
+_DERIV_SUFFIXES = (("ness", "nis"), ("less", "lis"), ("ment", "mәnt"), ("ful", "ful"),
+                   ("ly", "li"), ("ally", "әli"), ("er", "ә"), ("ing", "iŋ"),
+                   ("ed", None), ("es", None), ("s", None))
+
+
+def derive_phonetic(word):
+    """ECDICT 約 6% 常用字沒音標，幾乎都是衍生字/變化形（willingness、amplifying）。
+    用原形的音標加上字尾發音推導出來，純本機、毫秒級。推不出來回傳空字串。"""
+    w = word.lower()
+    if " " in w:  # 片語：每個字的音標接起來（set apart → set + apart）
+        parts = [_phonetic_of(p) or derive_phonetic(p) for p in w.split()]
+        return " ".join(parts) if all(parts) else ""
+
+    try:  # 1. ECDICT 的 exchange 欄位直接記錄原形與變化類型
+        row = _get_ecdict_con().execute(
+            "SELECT exchange FROM stardict WHERE word = ? COLLATE NOCASE", (w,)
+        ).fetchone()
+        ex = dict(p.split(":", 1) for p in (row[0] or "").split("/") if ":" in p) if row else {}
+        lemma, kind = ex.get("0"), ex.get("1", "")
+        if lemma and kind:
+            base = _phonetic_of(lemma)
+            if base:
+                k = kind[0]
+                suffix = {"i": "iŋ", "r": "ә", "t": "ist"}.get(k)
+                if k in "pd":
+                    suffix = _ed_sound(base)
+                elif k in "3s":
+                    suffix = _s_sound(base)
+                if suffix:
+                    return base + suffix
+    except Exception:
+        pass
+
+    for suf, sound in _DERIV_SUFFIXES:  # 2. 剝字尾找原形
+        if not w.endswith(suf) or len(w) - len(suf) < 3:
+            continue
+        stem = w[: -len(suf)]
+        candidates = [stem, stem + "e"]
+        if stem.endswith("i"):
+            candidates.append(stem[:-1] + "y")          # happi→happy
+        if len(stem) > 3 and stem[-1] == stem[-2]:
+            candidates.append(stem[:-1])                # admitt→admit
+        for c in candidates:
+            base = _phonetic_of(c)
+            if base:
+                if sound is None:
+                    sound = _ed_sound(base) if suf == "ed" else _s_sound(base)
+                return base + sound
+    return ""
+
+
 def _row_to_info(row):
     """把 ECDICT 的一列轉成 info dict（共用於單字查詢與片語偵測）。"""
     w, phonetic, translation, definition = row
     info = {"word": w, "phonetic": "", "pos": "", "definition": "", "translation": ""}
+    phonetic = (phonetic or "").strip() or derive_phonetic(w)
     if phonetic:
         info["phonetic"] = f"[{phonetic}]"
 
@@ -681,6 +756,14 @@ class VocabWindow:
             if local:
                 info = {**empty, **local}
                 self._post_fill(info, gen)
+                if not info["phonetic"]:  # 本機推導不出來 → 背景向 Datamuse 要音標
+                    try:
+                        ph = fetch_datamuse(urllib.parse.quote(info["word"]))["phonetic"]
+                        if ph:
+                            info = {**info, "phonetic": ph}
+                            self._post_fill(info, gen)
+                    except Exception:
+                        pass
                 try:  # 背景補例句與真人發音
                     da = fetch_dictapi(urllib.parse.quote(info["word"]))
                     info = dict(info)
