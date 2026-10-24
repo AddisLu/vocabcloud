@@ -184,14 +184,15 @@ def render_add_word():
     st.title("✏️ 怎麼新增單字")
     st.info("單字的 AI 解釋一律在**你的 Mac** 上產生，用的是 Claude Code Max 訂閱，雲端這邊不需要任何 API Key。")
 
-    st.subheader("方法一：捷徑（日常用這個）")
+    st.subheader("方法一：查單字浮動視窗（日常用這個）")
     st.markdown(
-        "在任何 App 選取英文單字 → 右鍵／分享選單執行「**英文練習**」捷徑。\n\n"
-        "成功會跳 macOS 通知，單字自動存進 Google Drive 的 `VocabularyLog`。"
+        "在任何 App 選取英文單字 → 右鍵 → **服務** → 「**VocabCloud 查單字**」（可設快捷鍵）。\n\n"
+        "浮動視窗會顯示**中文翻譯＋音標＋釋義**，按「➕ 加入單字庫」就存進 Google Drive 的 `VocabularyLog`。\n\n"
+        "詳見 repo 的 `tools/README.md`。"
     )
 
-    st.subheader("方法二：終端機（一次補很多字）")
-    st.code('python3 ~/15min/vocab_builder.py "resilient"', language="bash")
+    st.subheader("方法二：終端機")
+    st.code('python3 ~/coding/vocabcloud/tools/quick_vocab.py --add "resilient"', language="bash")
 
     st.subheader("最後一步")
     st.markdown("回首頁按 **☁️ Drive 同步**，就會把新單字讀進字庫，然後就能開始複習了。")
