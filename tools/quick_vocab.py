@@ -154,7 +154,7 @@ def local_lookup(word):
         if m:
             info["pos"] = ECDICT_POS.get(m.group(1), m.group(1) + ".")
         info["translation"] = to_traditional(
-            "；".join(re.sub(r"^[a-z]+\.\s*", "", l) for l in trans_lines[:3])
+            "；".join(re.sub(r"^[a-z]+\.\s*", "", l) for l in trans_lines[:2])
         )
 
     def_lines = [l.strip() for l in (definition or "").splitlines() if l.strip()]
@@ -538,7 +538,8 @@ class VocabWindow:
         if info["pos"]:
             parts.append(f"[{info['pos']}]")
         if info.get("definition"):
-            parts.append(info["definition"])
+            # 視窗只顯示英文釋義；中文翻譯上面綠字已有，不重複（存進字庫仍是完整版）
+            parts.append(info["definition"].split(" / ")[0])
         self.def_var.set(" ".join(parts))
         if info.get("example"):
             ex = info["example"]
@@ -557,10 +558,12 @@ class VocabWindow:
             sw = self.root.winfo_screenwidth()
             sh = self.root.winfo_screenheight()
             px, py = self.pointer
-            x = min(max(px - 160, 20), max(sw - w - 20, 20))
-            y = py + 18
-            if y + h > sh - 40:
-                y = max(py - h - 18, 20)
+            x = min(max(px - w // 2, 20), max(sw - w - 20, 20))
+            y = py + 18                      # 預設開在游標下方
+            if y + h > sh - 60:              # 下面放不下 → 試游標上方
+                y = py - h - 24
+            if y < 20:                       # 上面也放不下 → 貼著螢幕下緣能放下的位置
+                y = max(20, sh - h - 60)
             # 明確指定尺寸：macOS 上只設位置的話，視窗高度不會跟著內容長大
             self.root.geometry(f"{w}x{h}+{x}+{y}")
         except Exception:
