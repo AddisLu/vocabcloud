@@ -446,7 +446,6 @@ class VocabWindow:
         root.bind("<Return>", lambda e: self.on_add())
         root.bind("a", lambda e: self.on_add())      # 左手無名指原位
         root.bind("A", lambda e: self.on_add())
-        root.bind("<Tab>", lambda e: self.on_add())  # 左手小指也順
         root.bind("<space>", lambda e: self.on_play())
         root.bind("<FocusOut>", self._on_focus_out)  # 點視窗外面 → 自動關閉
         root.protocol("WM_DELETE_WINDOW", self.dismiss)
@@ -652,12 +651,12 @@ class VocabWindow:
         if not self.info:
             return
         ok, msg = add_to_log(self.info)
-        self.status_label.config(fg="#047857" if ok else "#b45309")
-        self.status_var.set(("✅ " if ok else "⚠️ ") + msg)
         notify("VocabCloud", msg)  # 系統通知：視窗關了也看得到
         if ok:
-            self.add_btn.config(state="disabled", text="✅ 已加入")
-            self.root.after(1500, self.dismiss)
+            self.dismiss()  # 加入成功立刻關窗，結果看系統通知
+        else:
+            self.status_label.config(fg="#b45309")
+            self.status_var.set("⚠️ " + msg)
 
 
 def send_to_daemon(word):
