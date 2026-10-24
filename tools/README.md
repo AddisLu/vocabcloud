@@ -57,7 +57,8 @@ macOS 服務機制本身每次要 ~1 秒啟動，BTT 直接執行可以壓到 ~0
 
 1. **三指按下**（3 Finger Click，實際壓下觸控板）✅ 主力：
    左手在觸控板雙擊選字 → 三指一壓。
-   注意：三指「點按」（tap）會被「三指拖移」手勢吃掉不能用，「按下」（click）才行。
+   **三指輕按**（tap）的觸發器也設好了，但會被系統「三指拖移」手勢吃掉；
+   想用輕按：系統設定 → 輔助使用 → 指標控制 → 觸控式軌跡板選項 → 關掉「拖移方式(三指拖移)」。
 2. **fn+F6** 備援（F 區是媒體鍵模式，單按 F6 會變勿擾模式，所以要加 fn）
 3. ⌃⌥V 服務選單備援
 
@@ -80,8 +81,9 @@ cp -R "tools/VocabCloud 查單字.workflow" ~/Library/Services/
 curl -L -o /tmp/ecdict.zip "https://github.com/skywind3000/ECDICT/releases/download/1.0.28/ecdict-sqlite-28.zip"
 unzip /tmp/ecdict.zip -d /tmp/ecdict && mv /tmp/ecdict/stardict.db tools/data/ecdict.db
 
-# 3. 簡轉繁套件
-python3 -m pip install --user --break-system-packages zhconv
+# 3. 簡轉繁套件（OpenCC s2twp：台灣正體+台灣用語；ECDICT 原文是簡體，
+#    開源界沒有同等規模的原生繁體離線英漢字典，故採轉換）
+python3 -m pip install --user --break-system-packages opencc-python-reimplemented
 ```
 
 注意 `.workflow` 裡的 script 路徑與 `quick_vocab.py` 裡的 `VOCAB_LOG_DIR` 寫死了本機路徑，換電腦要改。

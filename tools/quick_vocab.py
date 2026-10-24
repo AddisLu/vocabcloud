@@ -32,15 +32,21 @@ _zh_convert = None
 
 
 def to_traditional(s):
-    """簡轉繁。zhconv 載入要數百 ms，延遲到第一次用到才 import。"""
+    """簡轉繁（ECDICT 的中譯是簡體；沒有同等規模的原生繁體離線英漢字典）。
+    優先 OpenCC s2twp：台灣正體＋台灣用語（信息→資訊、軟件→軟體）；
+    沒裝就退回 zhconv。載入要數百 ms，延遲到第一次用到才 import（daemon 啟動時預載）。"""
     global _zh_convert
     if _zh_convert is None:
         try:
-            from zhconv import convert
-            _zh_convert = convert
+            from opencc import OpenCC
+            _zh_convert = OpenCC("s2twp").convert
         except ImportError:
-            _zh_convert = False
-    return _zh_convert(s, "zh-tw") if _zh_convert else s
+            try:
+                from zhconv import convert
+                _zh_convert = lambda s: convert(s, "zh-tw")
+            except ImportError:
+                _zh_convert = False
+    return _zh_convert(s) if _zh_convert else s
 
 ECDICT_DB = Path(__file__).resolve().parent / "data" / "ecdict.db"
 
