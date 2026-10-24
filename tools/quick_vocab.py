@@ -385,7 +385,8 @@ def play_pronunciation(word, audio_url=""):
     沒有 mp3 時直接 Popen say（毫秒級）；有 mp3 才開子程序下載播放。"""
     if not audio_url:
         voice = get_english_voice()
-        cmd = ["say"] + (["-v", voice] if voice else []) + [word]
+        # [[slnc 350]]：先墊 350ms 靜音讓音訊裝置醒來，否則閒置後第一次發音開頭會被截掉
+        cmd = ["say"] + (["-v", voice] if voice else []) + [f"[[slnc 350]] {word}"]
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return
     script = f'''
@@ -405,7 +406,7 @@ try:
 except Exception:
     pass
 if not played:
-    cmd = ["say"] + (["-v", voice] if voice else []) + [word]
+    cmd = ["say"] + (["-v", voice] if voice else []) + ["[[slnc 350]] " + word]
     subprocess.run(cmd, timeout=10)
 '''
     subprocess.Popen(
