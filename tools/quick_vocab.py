@@ -400,6 +400,7 @@ class VocabWindow:
         self.focus_job = None
         self.saw_active = False
         self.info = None
+        self.pending_add = False
 
         root = self.root = tk.Tk()
         root.title("VocabCloud")
@@ -503,6 +504,7 @@ class VocabWindow:
         gen = self.gen
         self.word = word
         self.info = None
+        self.pending_add = False
         self.word_var.set(word)
         self.phon_var.set("")
         self.trans_var.set("查詢中…")
@@ -574,6 +576,9 @@ class VocabWindow:
             self.ex_var.set(ex)
         self.add_btn.config(state="normal")
         self._place()  # 內容變多視窗會長高，重新調整避免超出螢幕
+        if self.pending_add:  # 資料還沒好時使用者就按了 ⌘ → 現在自動完成加入
+            self.pending_add = False
+            self.on_add()
 
     def _place(self):
         """開在游標旁，但完整留在螢幕內；太靠近底部就改開在游標上方。"""
@@ -653,7 +658,10 @@ class VocabWindow:
         play_pronunciation(self.word, self.info["audio_url"] if self.info else "")
 
     def on_add(self):
-        if not self.info:
+        if not self.info:  # 查詢還沒完成：記住意圖，fill() 完成後自動加入
+            self.pending_add = True
+            self.status_label.config(fg="#6b7280")
+            self.status_var.set("⏳ 查詢中，完成後自動加入…")
             return
         ok, msg = add_to_log(self.info)
         notify("VocabCloud", msg)  # 系統通知：視窗關了也看得到
