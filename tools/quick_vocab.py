@@ -415,8 +415,9 @@ class VocabWindow:
         self.play_btn.pack(side="left", padx=4)
         close_btn.pack(side="left", padx=4)
         self.add_btn.pack(side="left", padx=4)
-        tk.Label(root, textvariable=self.status_var, font=("Helvetica", 12),
-                 fg="#b45309").pack(side="bottom", anchor="w", pady=(4, 0))
+        self.status_label = tk.Label(root, textvariable=self.status_var,
+                                     font=("Helvetica", 14, "bold"), fg="#b45309")
+        self.status_label.pack(side="bottom", anchor="w", pady=(4, 0))
 
         tk.Label(root, textvariable=self.word_var, font=("Helvetica", 30, "bold")).pack(anchor="w")
         tk.Label(root, textvariable=self.phon_var, font=("Menlo", 15), fg="#6b7280").pack(anchor="w")
@@ -487,7 +488,7 @@ class VocabWindow:
         self.def_var.set("")
         self.ex_var.set("")
         self.status_var.set("")
-        self.add_btn.config(state="disabled")
+        self.add_btn.config(state="disabled", text="➕ 加入單字庫 (⏎)")
 
         try:
             self.pointer = self.root.winfo_pointerxy()
@@ -630,10 +631,12 @@ class VocabWindow:
         if not self.info:
             return
         ok, msg = add_to_log(self.info)
-        self.status_var.set(msg)
+        self.status_label.config(fg="#047857" if ok else "#b45309")
+        self.status_var.set(("✅ " if ok else "⚠️ ") + msg)
+        notify("VocabCloud", msg)  # 系統通知：視窗關了也看得到
         if ok:
-            self.add_btn.config(state="disabled")
-            self.root.after(1200, self.dismiss)
+            self.add_btn.config(state="disabled", text="✅ 已加入")
+            self.root.after(1500, self.dismiss)
 
 
 def send_to_daemon(word):
