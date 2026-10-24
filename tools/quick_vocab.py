@@ -385,7 +385,8 @@ def play_pronunciation(word, audio_url=""):
     沒有 mp3 時直接 Popen say（毫秒級）；有 mp3 才開子程序下載播放。"""
     if not audio_url:
         voice = get_english_voice()
-        # [[slnc 350]]：先墊 350ms 靜音讓音訊裝置醒來，否則閒置後第一次發音開頭會被截掉
+        # 備援路徑（CLI/一次性模式）才會走到這：墊靜音避免裝置喚醒截掉開頭。
+        # daemon 模式用常駐 NSSpeechSynthesizer＋音訊保溫，無此問題。
         cmd = ["say"] + (["-v", voice] if voice else []) + [f"[[slnc 350]] {word}"]
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return
@@ -481,6 +482,7 @@ class VocabWindow:
         self.saw_active = False
         self.info = None
         self.pending_add = False
+        self.preshow_active = False
 
         root = self.root = tk.Tk()
         root.title("VocabCloud")
@@ -537,6 +539,7 @@ class VocabWindow:
         root.protocol("WM_DELETE_WINDOW", self.dismiss)
 
         self._setup_macos()
+        self._setup_speech()
 
     # ---------- macOS 視窗層級：跨 Space、蓋過全螢幕 App ----------
     def _setup_macos(self):
@@ -558,6 +561,36 @@ class VocabWindow:
         except Exception:
             pass
 
+    def _setup_speech(self):
+        """常駐的行程內語音合成器：發音不再每次冷啟動 say（省 ~100ms 且不截頭）。"""
+        self.synth = None
+        try:
+            from AppKit import NSSpeechSynthesizer
+            voice = None
+            for v in NSSpeechSynthesizer.availableVoices():
+                s = str(v)
+                if "en-US" in s or ".en_US." in s:
+                    voice = v
+                    if "Samantha" in s:
+                        break
+            if voice:
+                self.synth = NSSpeechSynthesizer.alloc().initWithVoice_(voice)
+        except Exception:
+            self.synth = None
+
+    def _speak(self, text, audio_url=""):
+        if audio_url:  # 有真人 mp3 → 交給子程序下載播放
+            play_pronunciation(text, audio_url)
+            return
+        if self.synth is not None:
+            try:
+                self.synth.stopSpeaking()
+                self.synth.startSpeakingString_(text)
+                return
+            except Exception:
+                pass
+        play_pronunciation(text)  # 備援：say
+
     def _order_front(self):
         try:
             if self.nsapp:
@@ -574,6 +607,27 @@ class VocabWindow:
             pass
 
     # ---------- 顯示/隱藏 ----------
+    def preshow(self):
+        """手勢訊號一到就開窗（字還在複製中），字到了由 show() 無縫接手。"""
+        self.preshow_active = True
+        self.word_var.set("⋯")
+        self.word_label.config(font=("Helvetica", 30, "bold"))
+        self.phon_var.set("")
+        self.trans_var.set("偵測選取文字中…")
+        self.def_var.set("")
+        self.ex_var.set("")
+        self.status_var.set("")
+        self.add_btn.config(state="disabled", text="➕ 加入單字庫 (⌘)")
+        try:
+            self.pointer = self.root.winfo_pointerxy()
+        except Exception:
+            self.pointer = (200, 200)
+        self._place()
+        self.root.deiconify()
+        self._order_front()
+        self._reset_hide_timer()
+        self._watch_focus()
+
     def show(self, word):
         import threading
 
@@ -584,7 +638,9 @@ class VocabWindow:
         gen = self.gen
         self.word = word
         self.info = None
-        self.pending_add = False
+        # preshow 期間使用者可能已搶先按了 ⌘：意圖保留到資料到齊後自動加入
+        self.pending_add = self.pending_add and self.preshow_active
+        self.preshow_active = False
         self.word_var.set(word)
         self.phon_var.set("")
         self.trans_var.set("查詢中…")
@@ -607,7 +663,7 @@ class VocabWindow:
         self._reset_hide_timer()
         self._watch_focus()
 
-        play_pronunciation(word)  # 立刻用系統 TTS 唸一次，不等網路
+        self._speak(word)  # 立刻發音（常駐合成器，零冷啟動）
 
         empty = {"word": word, "phonetic": "", "pos": "", "definition": "",
                  "example": "", "translation": "", "example_zh": "", "audio_url": ""}
@@ -760,7 +816,7 @@ class VocabWindow:
 
     # ---------- 按鈕 ----------
     def on_play(self):
-        play_pronunciation(self.word, self.info["audio_url"] if self.info else "")
+        self._speak(self.word, self.info.get("audio_url", "") if self.info else "")
 
     def on_add(self):
         if not self.info:  # 查詢還沒完成：立刻關窗，fill() 完成後在背景自動加入
@@ -795,6 +851,30 @@ def send_to_daemon(word):
         return False
 
 
+def _start_audio_keepalive():
+    """背景無限循環播放靜音（混音，不影響其他聲音）。
+    像 podcast 播放器一樣一直握著音訊通道，發音才不會被裝置喚醒截掉開頭。
+    迴圈以 kill -0 檢查 daemon 是否還活著，daemon 結束迴圈就自行退出。"""
+    try:
+        wav = ECDICT_DB.parent / "silence.wav"
+        if not wav.exists():
+            import struct
+            import wave
+            wav.parent.mkdir(parents=True, exist_ok=True)
+            with wave.open(str(wav), "w") as f:
+                f.setnchannels(1)
+                f.setsampwidth(2)
+                f.setframerate(8000)
+                f.writeframes(struct.pack("<h", 0) * 8000 * 60)  # 60 秒靜音
+        subprocess.Popen(
+            ["/bin/sh", "-c",
+             f'while kill -0 {os.getpid()} 2>/dev/null; do afplay "{wav}"; done'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
 def serve():
     """常駐模式：視窗預先建好藏著，socket 收到訊息立刻喚醒。
 
@@ -815,6 +895,7 @@ def serve():
         local_lookup("preload")
 
     threading.Thread(target=preload, daemon=True).start()
+    _start_audio_keepalive()  # 常駐握住音訊通道：發音不再有裝置喚醒截頭/延遲
 
     try:
         from AppKit import NSPasteboard
@@ -834,15 +915,17 @@ def serve():
     tick_clip()
 
     def show_from_clipboard():
-        """等 ⌘C 更新剪貼簿（15ms 輪詢，最多 0.4s），一變就開窗。"""
+        """手勢訊號一到先開窗（偵測中狀態），⌘C 完成（15ms 輪詢）字就無縫填入。"""
         if pasteboard is None:
+            win.preshow()
             win.root.after(200, lambda: win.show(_read_clip()))
             return
         base = clip_state["base"]
-        # ⌘C 有時比 PRE 訊號先到：剪貼簿已經變了就直接開窗，不空等
+        # ⌘C 有時比 PRE 訊號先到：剪貼簿已經變了就直接開窗
         if pasteboard.changeCount() != base:
             win.show(_read_clip())
             return
+        win.preshow()  # 視窗先出來，字到了再填
         deadline = _time.time() + 0.4
 
         def poll():
@@ -854,6 +937,7 @@ def serve():
                 if text.strip():
                     win.show(text)  # 退而求其次：用現有剪貼簿內容
                 else:
+                    win.dismiss()
                     notify("VocabCloud", "沒有偵測到選取文字，請重新選字再試")
             else:
                 win.root.after(15, poll)
