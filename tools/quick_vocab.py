@@ -369,6 +369,19 @@ class VocabWindow:
         self.ex_var = tk.StringVar()
         self.status_var = tk.StringVar()
 
+        # 按鈕與狀態列先 pack 在底部：空間不夠時優先保住按鈕，不會被截掉
+        btns = tk.Frame(root)
+        btns.pack(side="bottom", anchor="e", pady=(12, 0))
+        self.play_btn = tk.Button(btns, text="🔊 發音 (空白鍵)", command=self.on_play)
+        close_btn = tk.Button(btns, text="關閉 (Esc)", command=self.dismiss)
+        self.add_btn = tk.Button(btns, text="➕ 加入單字庫 (⏎)", command=self.on_add,
+                                 state="disabled", default="active")
+        self.play_btn.pack(side="left", padx=4)
+        close_btn.pack(side="left", padx=4)
+        self.add_btn.pack(side="left", padx=4)
+        tk.Label(root, textvariable=self.status_var, font=("Helvetica", 12),
+                 fg="#b45309").pack(side="bottom", anchor="w", pady=(4, 0))
+
         tk.Label(root, textvariable=self.word_var, font=("Helvetica", 30, "bold")).pack(anchor="w")
         tk.Label(root, textvariable=self.phon_var, font=("Menlo", 15), fg="#6b7280").pack(anchor="w")
         tk.Label(root, textvariable=self.trans_var, font=("Helvetica", 19, "bold"),
@@ -377,20 +390,11 @@ class VocabWindow:
                  wraplength=WRAP, justify="left").pack(anchor="w", pady=(6, 0))
         tk.Label(root, textvariable=self.ex_var, font=("Helvetica", 13), fg="#2563eb",
                  wraplength=WRAP, justify="left").pack(anchor="w", pady=(6, 0))
-        tk.Label(root, textvariable=self.status_var, font=("Helvetica", 12), fg="#b45309").pack(anchor="w", pady=(4, 0))
-
-        btns = tk.Frame(root)
-        btns.pack(anchor="e", pady=(12, 0))
-        self.play_btn = tk.Button(btns, text="🔊 發音", command=self.on_play)
-        close_btn = tk.Button(btns, text="關閉", command=self.dismiss)
-        self.add_btn = tk.Button(btns, text="➕ 加入單字庫", command=self.on_add,
-                                 state="disabled", default="active")
-        self.play_btn.pack(side="left", padx=4)
-        close_btn.pack(side="left", padx=4)
-        self.add_btn.pack(side="left", padx=4)
 
         root.bind("<Escape>", lambda e: self.dismiss())
         root.bind("<Return>", lambda e: self.on_add())
+        root.bind("<space>", lambda e: self.on_play())
+        root.bind("<FocusOut>", self._on_focus_out)  # 點視窗外面 → 自動關閉
         root.protocol("WM_DELETE_WINDOW", self.dismiss)
 
         self._setup_macos()
@@ -444,12 +448,11 @@ class VocabWindow:
         self.status_var.set("")
         self.add_btn.config(state="disabled")
 
-        # 開在滑鼠游標旁邊
         try:
-            px, py = self.root.winfo_pointerxy()
-            self.root.geometry(f"+{max(px - 160, 20)}+{py + 18}")
+            self.pointer = self.root.winfo_pointerxy()
         except Exception:
-            pass
+            self.pointer = (200, 200)
+        self._place()
         self.root.deiconify()
         self._order_front()
         self._reset_hide_timer()
@@ -501,6 +504,36 @@ class VocabWindow:
                 ex += f"\n{info['example_zh']}"
             self.ex_var.set(ex)
         self.add_btn.config(state="normal")
+        self._place()  # 內容變多視窗會長高，重新調整避免超出螢幕
+
+    def _place(self):
+        """開在游標旁，但完整留在螢幕內；太靠近底部就改開在游標上方。"""
+        try:
+            self.root.update_idletasks()
+            w = self.root.winfo_reqwidth()
+            h = self.root.winfo_reqheight()
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            px, py = self.pointer
+            x = min(max(px - 160, 20), max(sw - w - 20, 20))
+            y = py + 18
+            if y + h > sh - 40:
+                y = max(py - h - 18, 20)
+            self.root.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+    def _on_focus_out(self, _event=None):
+        def check():
+            try:
+                if self.root.focus_displayof() is None and self.root.state() == "normal":
+                    self.dismiss()
+            except Exception:
+                pass
+        try:
+            self.root.after(150, check)
+        except Exception:
+            pass
 
     def _reset_hide_timer(self):
         if self.hide_job:

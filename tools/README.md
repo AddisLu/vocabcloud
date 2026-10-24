@@ -27,9 +27,15 @@ launchctl kickstart -k gui/$(id -u)/com.vocabcloud.quickvocab
 
 1. 在任何 App（瀏覽器、PDF、Notes…）選取英文單字
 2. 右鍵 → **服務** → **VocabCloud 查單字**（或用下面設定的快捷鍵）
-3. 浮動視窗顯示：音標、中文翻譯、詞性、英中釋義、例句
-4. 按「➕ 加入單字庫」→ 跳通知確認已存檔（重複的字會自動擋掉）
-5. 之後到 VocabCloud 網頁按「☁️ Drive 同步」匯入
+3. 浮動視窗顯示：音標、中文翻譯、詞性、英中釋義、例句，並自動唸一次
+4. 視窗內快速鍵：**空白鍵** 重播發音、**⏎** 加入單字庫、**Esc** 關閉，
+   **點視窗外任何地方也會自動關閉**（點回原 App 時焦點直接回去）
+5. 按「➕ 加入單字庫」後到 VocabCloud 網頁按「☁️ Drive 同步」匯入（重複的字會自動擋掉）
+
+### 聽 Podcast 的建議流程
+
+空白鍵暫停 → 雙擊生字 → 觸發查字（下方快捷鍵）→ 看翻譯＋聽發音（空白鍵重播）→
+需要就 ⏎ 加入字庫 → **直接點回 Podcast**（視窗自動關）→ 空白鍵繼續播放。
 
 ## 鍵盤快捷鍵
 
@@ -37,16 +43,22 @@ launchctl kickstart -k gui/$(id -u)/com.vocabcloud.quickvocab
 注意 ⌃⌥D 不能用——那是 macOS 內建「切換 Dock 自動隱藏」的快捷鍵，會被系統攔走。
 要改：系統設定 → 鍵盤 → 鍵盤快速鍵… → 服務 → 文字 → 「VocabCloud 查單字」。
 
-### 更快：用 BetterTouchTool 觸發（跳過 Automator 服務的 ~1 秒啟動）
+### 推薦：用 BetterTouchTool 觸發（最快，~0.2 秒）
 
-macOS 服務機制本身每次要 ~1 秒啟動，BTT 直接執行可以壓到 ~0.2 秒：
+macOS 服務機制本身每次要 ~1 秒啟動，BTT 直接執行可以壓到 ~0.2 秒。
+動作序列（兩種觸發都一樣）：
 
-1. BTT → Keyboard Shortcuts → 新增快捷鍵（例如 ⌃⌥V，先把服務那邊的快捷鍵移除）
-2. 加入動作序列：
-   - 「Send Keyboard Shortcut ⌘C」（複製選取的字）
-   - 短暫 delay 0.05s
-   - 「Execute Terminal Command (async)」：
-     `/opt/homebrew/bin/python3 /Users/yourulyu/coding/vocabcloud/tools/quick_vocab.py "$(pbpaste)"`
+- 「Send Keyboard Shortcut ⌘C」（複製選取的字）
+- delay 0.05s
+- 「Execute Terminal Command (async)」：
+  `/opt/homebrew/bin/python3 /Users/yourulyu/coding/vocabcloud/tools/quick_vocab.py "$(pbpaste)"`
+
+觸發方式推薦（聽 Podcast 情境，依好按程度）：
+
+1. **觸控板三指點按**（BTT → Trackpad → 3 Finger Tap）：
+   雙擊選字後手不用離開觸控板，直接三指一點
+2. **單鍵 F6**（BTT → Keyboard Shortcuts）：F 區沒人用、單鍵免按組合
+3. ⌃⌥V：保留給服務選單當備援也行
 
 ## 終端機用法
 
