@@ -420,7 +420,7 @@ class VocabWindow:
         btns.pack(side="bottom", anchor="e", pady=(12, 0))
         self.play_btn = tk.Button(btns, text="🔊 發音 (空白鍵)", command=self.on_play)
         close_btn = tk.Button(btns, text="關閉 (Esc)", command=self.dismiss)
-        self.add_btn = tk.Button(btns, text="➕ 加入單字庫 (⏎)", command=self.on_add,
+        self.add_btn = tk.Button(btns, text="➕ 加入單字庫 (A)", command=self.on_add,
                                  state="disabled", default="active")
         self.play_btn.pack(side="left", padx=4)
         close_btn.pack(side="left", padx=4)
@@ -444,6 +444,9 @@ class VocabWindow:
 
         root.bind("<Escape>", lambda e: self.dismiss())
         root.bind("<Return>", lambda e: self.on_add())
+        root.bind("a", lambda e: self.on_add())      # 左手無名指原位
+        root.bind("A", lambda e: self.on_add())
+        root.bind("<Tab>", lambda e: self.on_add())  # 左手小指也順
         root.bind("<space>", lambda e: self.on_play())
         root.bind("<FocusOut>", self._on_focus_out)  # 點視窗外面 → 自動關閉
         root.protocol("WM_DELETE_WINDOW", self.dismiss)
@@ -502,7 +505,7 @@ class VocabWindow:
         self.def_var.set("")
         self.ex_var.set("")
         self.status_var.set("")
-        self.add_btn.config(state="disabled", text="➕ 加入單字庫 (⏎)")
+        self.add_btn.config(state="disabled", text="➕ 加入單字庫 (A)")
         # 片語/整句：縮小標題字體
         self.word_label.config(
             font=("Helvetica", 16 if is_phrase(word) else 30, "bold")
