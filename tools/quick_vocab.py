@@ -411,6 +411,11 @@ class VocabWindow:
                 w.setLevel_(25)  # NSStatusWindowLevel
                 # canJoinAllSpaces (1<<0) + fullScreenAuxiliary (1<<8)
                 w.setCollectionBehavior_(w.collectionBehavior() | (1 << 0) | (1 << 8))
+                w.setTabbingMode_(2)  # 不允許 macOS 視窗分頁（避免 Console 併成分頁）
+        except Exception:
+            pass
+        try:
+            self.root.tk.call("console", "hide")  # 藏掉 Tk 的 Console 視窗
         except Exception:
             pass
 
@@ -519,7 +524,8 @@ class VocabWindow:
             y = py + 18
             if y + h > sh - 40:
                 y = max(py - h - 18, 20)
-            self.root.geometry(f"+{x}+{y}")
+            # 明確指定尺寸：macOS 上只設位置的話，視窗高度不會跟著內容長大
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
         except Exception:
             pass
 
