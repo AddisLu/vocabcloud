@@ -1,11 +1,3 @@
-# 忽略 Streamlit 的機密設定檔
-.streamlit/
-
-# 忽略虛擬環境資料夾 (非常肥大，不需要上傳)
-venv/
-
-# 忽略 Mac 系統自動產生的隱藏檔
-.DS_Store
-
-# 忽略 Python 暫存檔
+tools/data/
 __pycache__/
+*.pyc

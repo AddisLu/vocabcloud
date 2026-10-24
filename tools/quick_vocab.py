@@ -15,14 +15,28 @@
 VocabularyLog/vocab_YYYY-MM-DD.md，之後在 VocabCloud 網頁按「☁️ Drive 同步」匯入。
 """
 
+import concurrent.futures
 import json
 import re
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 from datetime import date
 from pathlib import Path
+
+try:
+    from zhconv import convert as _zh_convert
+
+    def to_traditional(s):
+        return _zh_convert(s, "zh-tw")
+except ImportError:
+    def to_traditional(s):
+        return s
+
+ECDICT_DB = Path(__file__).resolve().parent / "data" / "ecdict.db"
 
 VOCAB_LOG_DIR = Path.home() / "Library/CloudStorage/GoogleDrive-addislyu@gmail.com/我的雲端硬碟/VocabularyLog"
 
@@ -62,8 +76,118 @@ def translate_zh(text):
         return ""
 
 
+ECDICT_POS = {
+    "n": "n. (名詞)",
+    "v": "v. (動詞)",
+    "vt": "vt. (及物動詞)",
+    "vi": "vi. (不及物動詞)",
+    "a": "adj. (形容詞)",
+    "ad": "adv. (副詞)",
+    "adv": "adv. (副詞)",
+    "prep": "prep. (介系詞)",
+    "conj": "conj. (連接詞)",
+    "pron": "pron. (代名詞)",
+    "int": "int. (感嘆詞)",
+}
+
+
+def local_lookup(word):
+    """本機 ECDICT 離線字典，毫秒級。查到回傳部分 info dict，查不到回傳 None。"""
+    if not ECDICT_DB.exists():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{ECDICT_DB}?mode=ro", uri=True)
+        cur = con.cursor()
+
+        def q(w):
+            return cur.execute(
+                "SELECT word, phonetic, translation, definition FROM stardict "
+                "WHERE word = ? COLLATE NOCASE", (w,)
+            ).fetchone()
+
+        row = q(word)
+        if not row:  # 試著還原常見字尾變化
+            lw = word.lower()
+            for suf, rep in (("ies", "y"), ("es", ""), ("s", ""), ("ing", ""),
+                             ("ing", "e"), ("ed", ""), ("ed", "e")):
+                if lw.endswith(suf) and len(lw) - len(suf) >= 3:
+                    row = q(lw[: len(lw) - len(suf)] + rep)
+                    if row:
+                        break
+        con.close()
+    except Exception:
+        return None
+    if not row:
+        return None
+
+    w, phonetic, translation, definition = row
+    info = {"word": w, "phonetic": "", "pos": "", "definition": "", "translation": ""}
+    if phonetic:
+        info["phonetic"] = f"[{phonetic}]"
+
+    trans_lines = [l.strip() for l in (translation or "").splitlines() if l.strip()]
+    if trans_lines:
+        m = re.match(r"([a-z]+)\.\s*(.*)", trans_lines[0])
+        if m:
+            info["pos"] = ECDICT_POS.get(m.group(1), m.group(1) + ".")
+        info["translation"] = to_traditional(
+            "；".join(re.sub(r"^[a-z]+\.\s*", "", l) for l in trans_lines[:3])
+        )
+
+    def_lines = [l.strip() for l in (definition or "").splitlines() if l.strip()]
+    if def_lines:
+        en_def = re.sub(r"^[a-z]+\.\s*", "", def_lines[0])
+        info["definition"] = f"{en_def} / {info['translation']}" if info["translation"] else en_def
+    return info
+
+
+def fetch_datamuse(q):
+    """主要來源：Datamuse（音標/詞性/釋義），穩定。"""
+    out = {"phonetic": "", "pos": "", "definition": ""}
+    results = http_json(
+        f"https://api.datamuse.com/words?sp={q}&qe=sp&md=rd&max=1&ipa=1", timeout=6
+    )
+    if results:
+        r = results[0]
+        for tag in r.get("tags", []):
+            if tag.startswith("ipa_pron:"):
+                out["phonetic"] = f"/{tag.split(':', 1)[1].strip()}/"
+                break
+        defs = r.get("defs", [])
+        if defs:
+            pos, _, d = defs[0].partition("\t")
+            out["pos"] = POS_ZH.get(pos.strip(), pos.strip())
+            out["definition"] = d.strip()
+    return out
+
+
+def fetch_dictapi(q):
+    """輔助來源：dictionaryapi.dev（例句/音標/真人發音 mp3），常掛，失敗就略過。"""
+    out = {"phonetic": "", "example": "", "audio_url": ""}
+    entries = http_json(
+        f"https://api.dictionaryapi.dev/api/v2/entries/en/{q}", timeout=3
+    )
+    entry = entries[0]
+    for ph in entry.get("phonetics", []):
+        if not out["phonetic"] and ph.get("text"):
+            out["phonetic"] = ph["text"]
+        if not out["audio_url"] and ph.get("audio"):
+            out["audio_url"] = ph["audio"]
+    for m in entry.get("meanings", []):
+        for d in m.get("definitions", []):
+            if d.get("example"):
+                out["example"] = d["example"]
+                break
+        if out["example"]:
+            break
+    return out
+
+
 def lookup(word):
-    """回傳 dict: word, phonetic, pos, definition, example, translation, example_zh"""
+    """回傳 dict: word, phonetic, pos, definition, example, translation, example_zh, audio_url
+
+    所有網路查詢都並行跑，整體時間 ≈ 最慢的一條，而不是全部加總。
+    """
     info = {
         "word": word,
         "phonetic": "",
@@ -72,57 +196,99 @@ def lookup(word):
         "example": "",
         "translation": "",
         "example_zh": "",
+        "audio_url": "",
     }
-
     q = urllib.parse.quote(word)
 
-    # 主要來源：Datamuse（音標/詞性/釋義）
-    try:
-        results = http_json(
-            f"https://api.datamuse.com/words?sp={q}&qe=sp&md=rd&max=1&ipa=1"
-        )
-        if results:
-            r = results[0]
-            for tag in r.get("tags", []):
-                if tag.startswith("ipa_pron:"):
-                    info["phonetic"] = f"/{tag.split(':', 1)[1].strip()}/"
-                    break
-            defs = r.get("defs", [])
-            if defs:
-                pos, _, d = defs[0].partition("\t")
-                info["pos"] = POS_ZH.get(pos.strip(), pos.strip())
-                info["definition"] = d.strip()
-    except Exception:
-        pass  # 查不到字典仍可翻譯（例如片語）
+    # 本機字典命中 → 只上網補例句（短 timeout，失敗就算了）
+    local = local_lookup(word)
+    if local:
+        info.update(local)
+        try:
+            da = fetch_dictapi(urllib.parse.quote(info["word"]))
+            if da["example"]:
+                info["example"] = da["example"]
+                info["example_zh"] = translate_zh(da["example"])
+            info["audio_url"] = da["audio_url"]
+        except Exception:
+            pass
+        return info
 
-    # 輔助來源：dictionaryapi.dev（例句、較標準的音標），常掛，失敗就略過
+    # 本機查不到（如片語）→ 原網路流程。第一波：三個來源同時查
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        f_dm = ex.submit(fetch_datamuse, q)
+        f_da = ex.submit(fetch_dictapi, q)
+        f_tr = ex.submit(translate_zh, word)
+
+        try:
+            info.update(f_dm.result())
+        except Exception:
+            pass  # 查不到字典仍可翻譯（例如片語）
+        try:
+            da = f_da.result()
+            if da["phonetic"]:
+                info["phonetic"] = da["phonetic"]
+            info["example"] = da["example"]
+            info["audio_url"] = da["audio_url"]
+        except Exception:
+            pass
+        info["translation"] = f_tr.result()
+
+    # 第二波：釋義與例句的中文翻譯同時查
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        f_def = ex.submit(translate_zh, info["definition"]) if info["definition"] else None
+        f_ex = ex.submit(translate_zh, info["example"]) if info["example"] else None
+        if f_def:
+            zh_def = f_def.result()
+            if zh_def:
+                info["definition"] = f"{info['definition']} / {zh_def}"
+        if f_ex:
+            info["example_zh"] = f_ex.result()
+    return info
+
+
+def english_voice():
+    """找一個系統有安裝的英文語音（say 用），找不到回傳 None。"""
     try:
-        entries = http_json(
-            f"https://api.dictionaryapi.dev/api/v2/entries/en/{q}", timeout=4
-        )
-        entry = entries[0]
-        for ph in entry.get("phonetics", []):
-            if ph.get("text"):
-                info["phonetic"] = ph["text"]
-                break
-        for m in entry.get("meanings", []):
-            for d in m.get("definitions", []):
-                if d.get("example"):
-                    info["example"] = d["example"]
-                    break
-            if info["example"]:
-                break
+        out = subprocess.run(
+            ["say", "-v", "?"], capture_output=True, text=True, timeout=5
+        ).stdout
+        for v in ("Samantha", "Alex", "Daniel", "Karen", "Moira", "Fred"):
+            if re.search(rf"^{v}\b", out, re.MULTILINE):
+                return v
     except Exception:
         pass
+    return None
 
-    info["translation"] = translate_zh(word)
-    if info["definition"]:
-        zh_def = translate_zh(info["definition"])
-        if zh_def:
-            info["definition"] = f"{info['definition']} / {zh_def}"
-    if info["example"]:
-        info["example_zh"] = translate_zh(info["example"])
-    return info
+
+def play_pronunciation(word, audio_url=""):
+    """在背景播放發音：優先用字典的真人 mp3，沒有就用系統 TTS。不阻塞。"""
+    script = f'''
+import subprocess, urllib.request, tempfile, os
+audio_url = {audio_url!r}
+word = {word!r}
+voice = {english_voice()!r}
+played = False
+if audio_url:
+    try:
+        req = urllib.request.Request(audio_url, headers={{"User-Agent": "VocabCloud/1.0"}})
+        data = urllib.request.urlopen(req, timeout=4).read()
+        f = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        f.write(data); f.close()
+        subprocess.run(["afplay", f.name], timeout=10)
+        os.unlink(f.name)
+        played = True
+    except Exception:
+        pass
+if not played:
+    cmd = ["say"] + (["-v", voice] if voice else []) + [word]
+    subprocess.run(cmd, timeout=10)
+'''
+    subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def already_in_log(word):
@@ -172,35 +338,120 @@ def esc(s):
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def show_dialog(info):
-    """浮動視窗顯示查詢結果；按「加入單字庫」回傳 True。"""
-    lines = [info["word"]]
-    if info["phonetic"]:
-        lines[0] += f"  {info['phonetic']}"
-    if info["translation"]:
-        lines.append(f"🀄 {info['translation']}")
-    if info["pos"]:
-        lines.append(f"📎 {info['pos']}")
-    if info["definition"]:
-        lines.append(f"📖 {info['definition']}")
-    if info["example"]:
-        ex = info["example"]
-        if info["example_zh"]:
-            ex += f"\n　  {info['example_zh']}"
-        lines.append(f"✏️ {ex}")
-    if len(lines) == 1:
-        lines.append("（查無資料，仍可加入單字庫稍後補充）")
-    text = "\n\n".join(lines)
+def run_gui(word):
+    """立刻開一個浮動視窗（先顯示查詢中），查詢在背景跑完後原地更新。"""
+    import threading
+    import tkinter as tk
 
-    script = (
-        f'display dialog "{esc(text)}" with title "VocabCloud 查單字" '
-        f'buttons {{"關閉", "➕ 加入單字庫"}} default button "➕ 加入單字庫" '
-        f'with icon note giving up after 60'
-    )
-    result = subprocess.run(
-        ["osascript", "-e", script], capture_output=True, text=True, check=False
-    )
-    return "加入單字庫" in (result.stdout or "")
+    root = tk.Tk()
+    root.title("VocabCloud")
+    root.attributes("-topmost", True)
+    root.resizable(False, False)
+    root.configure(padx=22, pady=16)
+
+    # 開在滑鼠游標旁邊
+    try:
+        px, py = root.winfo_pointerxy()
+        root.geometry(f"+{max(px - 160, 20)}+{py + 18}")
+    except Exception:
+        pass
+
+    WRAP = 360
+    word_var = tk.StringVar(value=word)
+    phon_var = tk.StringVar(value="")
+    trans_var = tk.StringVar(value="查詢中…")
+    def_var = tk.StringVar(value="")
+    ex_var = tk.StringVar(value="")
+    status_var = tk.StringVar(value="")
+
+    tk.Label(root, textvariable=word_var, font=("Helvetica", 30, "bold")).pack(anchor="w")
+    tk.Label(root, textvariable=phon_var, font=("Menlo", 15), fg="#6b7280").pack(anchor="w")
+    tk.Label(root, textvariable=trans_var, font=("Helvetica", 19, "bold"),
+             fg="#047857", wraplength=WRAP, justify="left").pack(anchor="w", pady=(8, 0))
+    tk.Label(root, textvariable=def_var, font=("Helvetica", 14),
+             wraplength=WRAP, justify="left").pack(anchor="w", pady=(6, 0))
+    tk.Label(root, textvariable=ex_var, font=("Helvetica", 13), fg="#2563eb",
+             wraplength=WRAP, justify="left").pack(anchor="w", pady=(6, 0))
+    tk.Label(root, textvariable=status_var, font=("Helvetica", 12), fg="#b45309").pack(anchor="w", pady=(4, 0))
+
+    btns = tk.Frame(root)
+    btns.pack(anchor="e", pady=(12, 0))
+    state = {"info": None}
+
+    def on_play():
+        info = state["info"]
+        play_pronunciation(word, info["audio_url"] if info else "")
+
+    def on_add():
+        info = state["info"]
+        if not info:
+            return
+        ok, msg = add_to_log(info)
+        status_var.set(msg)
+        if ok:
+            add_btn.config(state="disabled")
+            root.after(1500, root.destroy)
+
+    play_btn = tk.Button(btns, text="🔊 發音", command=on_play)
+    add_btn = tk.Button(btns, text="➕ 加入單字庫", command=on_add, state="disabled", default="active")
+    close_btn = tk.Button(btns, text="關閉", command=root.destroy)
+    play_btn.pack(side="left", padx=4)
+    close_btn.pack(side="left", padx=4)
+    add_btn.pack(side="left", padx=4)
+
+    root.bind("<Escape>", lambda e: root.destroy())
+    root.bind("<Return>", lambda e: on_add())
+
+    def fill(info):
+        state["info"] = info
+        if info["phonetic"]:
+            phon_var.set(info["phonetic"])
+        trans_var.set(info["translation"] or "（查無翻譯）")
+        parts = []
+        if info["pos"]:
+            parts.append(f"[{info['pos']}]")
+        if info.get("definition"):
+            parts.append(info["definition"])
+        def_var.set(" ".join(parts))
+        if info.get("example"):
+            ex = info["example"]
+            if info.get("example_zh"):
+                ex += f"\n{info['example_zh']}"
+            ex_var.set(ex)
+        add_btn.config(state="normal")
+
+    # 本機字典：毫秒級，開窗就是完整資料
+    local = local_lookup(word)
+    if local:
+        local = {**{"example": "", "example_zh": "", "audio_url": ""}, **local}
+        fill(local)
+
+        def worker():  # 背景只補例句與真人發音
+            info = dict(state["info"])
+            try:
+                da = fetch_dictapi(urllib.parse.quote(info["word"]))
+                if da["example"]:
+                    info["example"] = da["example"]
+                    info["example_zh"] = translate_zh(da["example"])
+                info["audio_url"] = da["audio_url"]
+                root.after(0, fill, info)
+            except Exception:
+                pass
+    else:
+        def worker():  # 本機查不到（片語等）→ 走網路
+            info = lookup(word)
+            try:
+                root.after(0, fill, info)
+            except Exception:
+                pass  # 視窗已被關掉
+
+    threading.Thread(target=worker, daemon=True).start()
+    play_pronunciation(word)  # 立刻用系統 TTS 唸一次，不等網路
+
+    root.after(90_000, root.destroy)  # 90 秒沒動作自動關閉
+    root.lift()
+    root.focus_force()
+    root.mainloop()
 
 
 def main():
@@ -216,6 +467,10 @@ def main():
     if not word:
         sys.exit(1)
 
+    if mode == "dialog":
+        run_gui(word)
+        return
+
     info = lookup(word)
 
     if mode == "lookup":
@@ -226,12 +481,6 @@ def main():
         ok, msg = add_to_log(info)
         notify("VocabCloud", msg)
         print(msg)
-        return
-
-    # dialog 模式
-    if show_dialog(info):
-        ok, msg = add_to_log(info)
-        notify("VocabCloud", msg)
 
 
 if __name__ == "__main__":

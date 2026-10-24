@@ -59,7 +59,8 @@
 				<key>ActionParameters</key>
 				<dict>
 					<key>COMMAND_STRING</key>
-					<string>/usr/bin/python3 /Users/yourulyu/coding/vocabcloud/tools/quick_vocab.py "$@" &gt;/dev/null 2&gt;&amp;1 &amp;</string>
+					<string>PY=/opt/homebrew/bin/python3; [ -x "$PY" ] || PY=/usr/bin/python3
+"$PY" /Users/yourulyu/coding/vocabcloud/tools/quick_vocab.py "$@" &gt;/dev/null 2&gt;&amp;1 &amp;</string>
 					<key>CheckedForUserDefaultShell</key>
 					<true/>
 					<key>inputMethod</key>
