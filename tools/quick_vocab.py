@@ -142,7 +142,11 @@ def local_lookup(word):
         return None
     if not row:
         return None
+    return _row_to_info(row)
 
+
+def _row_to_info(row):
+    """把 ECDICT 的一列轉成 info dict（共用於單字查詢與片語偵測）。"""
     w, phonetic, translation, definition = row
     info = {"word": w, "phonetic": "", "pos": "", "definition": "", "translation": ""}
     if phonetic:
@@ -162,6 +166,71 @@ def local_lookup(word):
         en_def = re.sub(r"^[a-z]+\.\s*", "", def_lines[0])
         info["definition"] = f"{en_def} / {info['translation']}" if info["translation"] else en_def
     return info
+
+
+_STOPWORDS = {"a", "an", "the", "is", "are", "was", "were", "be", "been", "it",
+              "its", "this", "that", "what", "who", "and", "or", "but", "so",
+              "of", "to", "in", "on", "at", "as", "by", "he", "she", "they", "we"}
+
+
+def _word_forms(w):
+    """還原常見字尾變化：sets→set、setting→set…（含原形）"""
+    forms = [w]
+    for suf, rep in (("ies", "y"), ("es", ""), ("s", ""), ("ing", ""),
+                     ("ing", "e"), ("ed", ""), ("ed", "e")):
+        if w.endswith(suf) and len(w) - len(suf) >= 2:
+            forms.append(w[: len(w) - len(suf)] + rep)
+    return forms
+
+
+def find_phrases(text, limit=3):
+    """在一段選取文字中自動偵測 ECDICT 收錄的片語。
+
+    掃描 2~4 字的連續組合，以及「動詞 … 介係詞」被 1~2 個字隔開的組合
+    （sets Xiang apart → set apart），第一個字做字尾還原。
+    回傳 info dict list，長的/連續的優先。
+    """
+    if not ECDICT_DB.exists():
+        return []
+    words = [w.lower() for w in re.findall(r"[A-Za-z']+", text)]
+    n = len(words)
+    candidates = []  # (score, phrase)
+
+    for i in range(n):
+        for length in (4, 3, 2):  # 連續 n-gram，長的分數高
+            if i + length <= n:
+                rest = words[i + 1: i + length]
+                for f in _word_forms(words[i]):
+                    candidates.append((length * 10, " ".join([f] + rest)))
+        for gap in (1, 2):  # 隔開的動詞片語：set ... apart
+            j = i + gap + 1
+            if j < n:
+                for f in _word_forms(words[i]):
+                    candidates.append((15, f"{f} {words[j]}"))
+
+    seen, results = set(), []
+    try:
+        cur = _get_ecdict_con().cursor()
+        for score, phrase in sorted(candidates, key=lambda c: -c[0]):
+            if phrase in seen or " " not in phrase:
+                continue
+            seen.add(phrase)
+            parts = phrase.split()
+            if all(p in _STOPWORDS for p in parts):
+                continue
+            row = cur.execute(
+                "SELECT word, phonetic, translation, definition FROM stardict "
+                "WHERE word = ? COLLATE NOCASE", (phrase,)
+            ).fetchone()
+            if row:
+                info = _row_to_info(row)
+                if info["translation"] or info["definition"]:
+                    results.append(info)
+                    if len(results) >= limit:
+                        break
+    except Exception:
+        pass
+    return results
 
 
 def is_phrase(text):
@@ -226,9 +295,19 @@ def lookup(word):
         "example_zh": "",
         "audio_url": "",
     }
-    # 片語/整句：音標與字典釋義無意義，直接翻譯
+    # 片語/整句：翻譯整句，並自動偵測其中的字典片語（set apart 等）
     if is_phrase(word):
-        info["translation"] = translate_zh(word)
+        sentence_zh = translate_zh(word)
+        matches = find_phrases(word)
+        if matches:
+            best = matches[0]
+            info.update(best)          # 片語當主條目
+            info["example"] = word     # 原選取整句變例句
+            info["example_zh"] = sentence_zh
+            if len(matches) > 1:
+                info["others"] = [m["word"] for m in matches[1:]]
+        else:
+            info["translation"] = sentence_zh
         return info
 
     q = urllib.parse.quote(word)
@@ -529,10 +608,28 @@ class VocabWindow:
 
         play_pronunciation(word)  # 立刻用系統 TTS 唸一次，不等網路
 
+        empty = {"word": word, "phonetic": "", "pos": "", "definition": "",
+                 "example": "", "translation": "", "example_zh": "", "audio_url": ""}
+
         def worker():
+            if is_phrase(word):
+                # 片語偵測是純本機（毫秒級）：命中就先開窗顯示片語條目，
+                # 整句翻譯（網路，較慢）在背景補上 → 跟單字一樣快
+                matches = find_phrases(word)
+                if matches:
+                    info = {**empty, **matches[0], "example": word}
+                    if len(matches) > 1:
+                        info["others"] = [m["word"] for m in matches[1:]]
+                    self._post_fill(info, gen)
+                    info = {**info, "example_zh": translate_zh(word)}
+                    self._post_fill(info, gen)
+                else:  # 沒有字典片語 → 整句翻譯
+                    self._post_fill({**empty, "translation": translate_zh(word)}, gen)
+                return
+
             local = local_lookup(word)  # 毫秒級
             if local:
-                info = {**{"example": "", "example_zh": "", "audio_url": ""}, **local}
+                info = {**empty, **local}
                 self._post_fill(info, gen)
                 try:  # 背景補例句與真人發音
                     da = fetch_dictapi(urllib.parse.quote(info["word"]))
@@ -544,7 +641,7 @@ class VocabWindow:
                     self._post_fill(info, gen)
                 except Exception:
                     pass
-            else:  # 本機查不到（片語等）→ 走網路
+            else:  # 本機查不到 → 走網路
                 self._post_fill(lookup(word), gen)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -559,6 +656,11 @@ class VocabWindow:
         if gen != self.gen:
             return  # 已經在查別的字了
         self.info = info
+        if info["word"] != self.word:  # 片語偵測把主條目換成了字典片語
+            self.word_var.set(info["word"])
+            self.word_label.config(
+                font=("Helvetica", 16 if is_phrase(info["word"]) else 30, "bold")
+            )
         if info["phonetic"]:
             self.phon_var.set(info["phonetic"])
         self.trans_var.set(info["translation"] or "（查無翻譯）")
@@ -568,6 +670,8 @@ class VocabWindow:
         if info.get("definition"):
             # 視窗只顯示英文釋義；中文翻譯上面綠字已有，不重複（存進字庫仍是完整版）
             parts.append(info["definition"].split(" / ")[0])
+        if info.get("others"):
+            parts.append("🧩 其他片語: " + "、".join(info["others"]))
         self.def_var.set(" ".join(parts))
         if info.get("example"):
             ex = info["example"]
