@@ -483,7 +483,6 @@ class VocabWindow:
         self.saw_active = False
         self.info = None
         self.pending_add = False
-        self.preshow_active = False
         self.shown_at = 0.0
 
         root = self.root = tk.Tk()
@@ -620,27 +619,8 @@ class VocabWindow:
         self.on_add()
 
     # ---------- 顯示/隱藏 ----------
-    def preshow(self):
-        """手勢訊號一到就開窗（字還在複製中），字到了由 show() 無縫接手。"""
-        self.preshow_active = True
-        self.word_var.set("⋯")
-        self.word_label.config(font=("Helvetica", 30, "bold"))
-        self.phon_var.set("")
-        self.trans_var.set("偵測選取文字中…")
-        self.def_var.set("")
-        self.ex_var.set("")
-        self.status_var.set("")
-        self.add_btn.config(state="disabled", text="➕ 加入單字庫 (⌘)")
-        try:
-            self.pointer = self.root.winfo_pointerxy()
-        except Exception:
-            self.pointer = (200, 200)
-        self._place()
-        self.shown_at = time.time()
-        self.root.deiconify()
-        self._order_front(activate=False)  # 不搶焦點，讓 ⌘C 送到原 App
-        self._reset_hide_timer()
-
+    # 注意：不能在 ⌘C 完成前開窗。Tk 的 deiconify 會讓本 App 變成前景，
+    # BTT 送的 ⌘C 就會打到這個視窗而不是原 App，導致複製失敗。
     def show(self, word):
         import threading
 
@@ -651,9 +631,8 @@ class VocabWindow:
         gen = self.gen
         self.word = word
         self.info = None
-        # preshow 期間使用者可能已搶先按了 ⌘：意圖保留到資料到齊後自動加入
-        self.pending_add = self.pending_add and self.preshow_active
-        self.preshow_active = False
+        self.pending_add = False
+        self.shown_at = time.time()
         self.word_var.set(word)
         self.phon_var.set("")
         self.trans_var.set("查詢中…")
@@ -928,9 +907,8 @@ def serve():
     tick_clip()
 
     def show_from_clipboard():
-        """手勢訊號一到先開窗（偵測中狀態），⌘C 完成（15ms 輪詢）字就無縫填入。"""
+        """等 BTT 的 ⌘C 更新剪貼簿（15ms 輪詢），一變就開窗。"""
         if pasteboard is None:
-            win.preshow()
             win.root.after(200, lambda: win.show(_read_clip()))
             return
         base = clip_state["base"]
@@ -938,17 +916,13 @@ def serve():
         if pasteboard.changeCount() != base:
             win.show(_read_clip())
             return
-        win.preshow()  # 視窗先出來，字到了再填
-        deadline = _time.time() + 0.4
+        deadline = _time.time() + 0.8  # BTT 偶爾較慢，留寬一點
 
         def poll():
             if pasteboard.changeCount() != base:
                 win.show(_read_clip())
             elif _time.time() > deadline:
                 # ⌘C 沒複製到東西（選取掉了/App 不支援）。不拿舊剪貼簿充數，免得查錯字
-                win.preshow_active = False
-                win.pending_add = False
-                win.dismiss()
                 notify("VocabCloud", "沒有偵測到選取文字，請重新選字再試")
             else:
                 win.root.after(15, poll)
