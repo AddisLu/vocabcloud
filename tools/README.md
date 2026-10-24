@@ -53,12 +53,13 @@ macOS 服務機制本身每次要 ~1 秒啟動，BTT 直接執行可以壓到 ~0
 - 「Execute Terminal Command (async)」：
   `/opt/homebrew/bin/python3 /Users/yourulyu/coding/vocabcloud/tools/quick_vocab.py "$(pbpaste)"`
 
-觸發方式：**單鍵 F6** ✅ 已設定（BTT → Keyboard Shortcuts，備註「VocabCloud 查單字 (F6)」）。
+觸發方式（都已設定在 BTT）：
 
-- 內建鍵盤的 F6 若被系統當媒體鍵（勿擾模式等），要按 **fn+F6**，
-  或到系統設定 → 鍵盤 → 把「將 F1、F2 等按鍵當作標準功能鍵」打開
-- 曾試過三指點按，但與「三指拖移」手勢衝突吃不到，故改 F6
-- ⌃⌥V 服務選單保留當備援
+1. **三指按下**（3 Finger Click，實際壓下觸控板）✅ 主力：
+   左手在觸控板雙擊選字 → 三指一壓。
+   注意：三指「點按」（tap）會被「三指拖移」手勢吃掉不能用，「按下」（click）才行。
+2. **fn+F6** 備援（F 區是媒體鍵模式，單按 F6 會變勿擾模式，所以要加 fn）
+3. ⌃⌥V 服務選單備援
 
 ## 終端機用法
 
