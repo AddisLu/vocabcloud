@@ -689,8 +689,8 @@ class VocabWindow:
             pass
 
     def _on_cmd(self):
-        # BTT 送 ⌘C 時的 ⌘ 可能落到本視窗：顯示後 0.3 秒內的 ⌘ 一律忽略
-        if time.time() - self.shown_at < 0.3:
+        # BTT 送出的按鍵若殘留到本視窗：顯示後 0.15 秒內的 ⌘ 忽略（低於人的反應時間）
+        if time.time() - self.shown_at < 0.15:
             return
         self.on_add()
 
@@ -921,13 +921,21 @@ class VocabWindow:
             else:
                 self.dismiss()  # daemon 模式：視窗先收，結果看系統通知
             return
-        ok, msg = add_to_log(self.info)
-        notify("VocabCloud", msg)  # 系統通知：視窗關了也看得到
-        if ok:
-            self.dismiss()  # 加入成功立刻關窗，結果看系統通知
-        else:
-            self.status_label.config(fg="#b45309")
-            self.status_var.set("⚠️ " + msg)
+        info = self.info
+        if self.oneshot:  # 一次性模式關窗=程式結束，只能先寫完再關
+            ok, msg = add_to_log(info)
+            notify("VocabCloud", msg)
+            self.dismiss()
+            return
+        # 先關窗再寫檔：查重複(~80ms)＋系統通知(~170ms)都丟背景，按下去視窗立刻消失
+        self.dismiss()
+
+        def work():
+            ok, msg = add_to_log(info)
+            notify("VocabCloud", msg)
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
 
 
 def send_to_daemon(word):
@@ -967,6 +975,60 @@ def _start_audio_keepalive():
         )
     except Exception:
         pass
+
+
+HOTKEY_KEYCODE = 80                      # F19
+HOTKEY_MODS = 256 | 512 | 2048 | 4096    # ⌘ ⇧ ⌥ ⌃（Carbon 修飾鍵旗標）
+_hotkey_refs = []                        # 保住 ctypes callback，避免被 GC
+
+
+def _register_hotkey(callback):
+    """用 Carbon RegisterEventHotKey 註冊全域快捷鍵 ⌃⌥⇧⌘F19（不需輔助使用權限）。
+    BTT 送這組鍵當作「查字」訊號：比 BTT 執行 shell 指令快約 0.5 秒。"""
+    import ctypes
+
+    try:
+        carbon = ctypes.CDLL("/System/Library/Frameworks/Carbon.framework/Carbon")
+    except OSError:
+        return False
+
+    def fourcc(s):
+        return int.from_bytes(s.encode(), "big")
+
+    class EventTypeSpec(ctypes.Structure):
+        _fields_ = [("eventClass", ctypes.c_uint32), ("eventKind", ctypes.c_uint32)]
+
+    class EventHotKeyID(ctypes.Structure):
+        _fields_ = [("signature", ctypes.c_uint32), ("id", ctypes.c_uint32)]
+
+    Handler = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+
+    def on_hotkey(_call_ref, _event, _data):
+        try:
+            callback()
+        except Exception:
+            pass
+        return 0
+
+    handler = Handler(on_hotkey)
+    carbon.GetApplicationEventTarget.restype = ctypes.c_void_p
+    carbon.InstallEventHandler.argtypes = [
+        ctypes.c_void_p, Handler, ctypes.c_uint32, ctypes.POINTER(EventTypeSpec),
+        ctypes.c_void_p, ctypes.c_void_p]
+    carbon.RegisterEventHotKey.argtypes = [
+        ctypes.c_uint32, ctypes.c_uint32, EventHotKeyID, ctypes.c_void_p,
+        ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
+
+    target = carbon.GetApplicationEventTarget()
+    spec = EventTypeSpec(fourcc("keyb"), 5)  # kEventClassKeyboard / kEventHotKeyPressed
+    if carbon.InstallEventHandler(target, handler, 1, ctypes.byref(spec), None, None) != 0:
+        return False
+    ref = ctypes.c_void_p()
+    status = carbon.RegisterEventHotKey(
+        HOTKEY_KEYCODE, HOTKEY_MODS, EventHotKeyID(fourcc("VOCB"), 1), target, 0,
+        ctypes.byref(ref))
+    _hotkey_refs.extend([handler, ref])
+    return status == 0
 
 
 def serve():
@@ -1060,6 +1122,22 @@ def serve():
                     win.root.after(0, win.show, data)
             except Exception:
                 pass
+
+    # 主要訊號：全域快捷鍵（BTT 送 ⌃⌥⇧⌘F19）。socket 的 PRE 保留給舊設定/測試。
+    # 快捷鍵回呼發生在 Tk 主迴圈處理事件途中，回呼裡碰 tkinter 會讓直譯器崩潰，
+    # 所以回呼只舉旗，由 Tk 自己每 10ms 檢查旗子。
+    hotkey_hits = []
+
+    def check_hotkey():
+        if hotkey_hits:
+            hotkey_hits.clear()
+            show_from_clipboard()
+        win.root.after(10, check_hotkey)
+
+    if _register_hotkey(lambda: hotkey_hits.append(1)):
+        check_hotkey()
+    else:
+        print("hotkey registration failed", file=sys.stderr, flush=True)
 
     if Path(SOCKET_PATH).exists():
         Path(SOCKET_PATH).unlink()

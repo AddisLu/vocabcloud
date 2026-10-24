@@ -54,6 +54,8 @@ macOS 服務機制本身每次要 ~1 秒啟動，BTT 直接執行可以壓到 ~0
   `/opt/homebrew/bin/python3 /Users/yourulyu/coding/vocabcloud/tools/quick_vocab.py "$(pbpaste)"`
 
 觸發方式：**四指輕點**（4 Finger Tap，設定在 BTT）。
+BTT 動作：送 ⌘C → 送 ⌃⌥⇧⌘F19。daemon 用 Carbon 註冊 ⌃⌥⇧⌘F19 為全域快捷鍵（不需權限），
+收到就讀剪貼簿開窗。不要改回 BTT 的「執行 shell 指令」：那個動作本身就要約 0.5 秒。
 系統四指手勢都是滑動，輕點零衝突，三指拖移照常可用。
 四指要同時落下：若手指不同步，可能被「輕點來點按」認成單指點擊而清掉選取。
 
