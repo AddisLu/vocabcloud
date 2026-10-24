@@ -387,6 +387,8 @@ class VocabWindow:
         self.word = ""
         self.gen = 0          # 世代計數，避免舊查詢結果蓋掉新單字
         self.hide_job = None
+        self.focus_job = None
+        self.saw_active = False
         self.info = None
 
         root = self.root = tk.Tk()
@@ -495,6 +497,7 @@ class VocabWindow:
         self.root.deiconify()
         self._order_front()
         self._reset_hide_timer()
+        self._watch_focus()
 
         play_pronunciation(word)  # 立刻用系統 TTS 唸一次，不等網路
 
@@ -574,6 +577,36 @@ class VocabWindow:
             self.root.after(150, check)
         except Exception:
             pass
+
+    def _watch_focus(self):
+        """點視窗外面自動關閉：輪詢 NSApp 作用中狀態。
+        （FocusOut 事件在 accessory App 的 Tk 視窗上不可靠，故用輪詢）"""
+        if self.focus_job:
+            try:
+                self.root.after_cancel(self.focus_job)
+            except Exception:
+                pass
+            self.focus_job = None
+        self.saw_active = False
+
+        def loop():
+            self.focus_job = None
+            if self.root.state() != "normal":
+                return  # 已收起
+            active = True
+            try:
+                if self.nsapp is not None:
+                    active = bool(self.nsapp.isActive())
+            except Exception:
+                pass
+            if active:
+                self.saw_active = True
+            elif self.saw_active:  # 曾取得焦點、現在失去 → 使用者點了外面
+                self.dismiss()
+                return
+            self.focus_job = self.root.after(200, loop)
+
+        self.focus_job = self.root.after(400, loop)  # 給視窗一點時間完成 activate
 
     def _reset_hide_timer(self):
         if self.hide_job:
