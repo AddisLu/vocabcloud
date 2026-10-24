@@ -53,15 +53,14 @@ macOS 服務機制本身每次要 ~1 秒啟動，BTT 直接執行可以壓到 ~0
 - 「Execute Terminal Command (async)」：
   `/opt/homebrew/bin/python3 /Users/yourulyu/coding/vocabcloud/tools/quick_vocab.py "$(pbpaste)"`
 
-觸發方式（都已設定在 BTT）：
+觸發方式：**四指輕點**（4 Finger Tap，設定在 BTT）。
+系統四指手勢都是滑動，輕點零衝突，三指拖移照常可用。
 
-1. **四指輕點**（4 Finger Tap）✅ 推薦：系統四指手勢都是滑動，輕點零衝突，
-   開不開三指拖移都能用。
-2. **三指輕按**（3 Finger Tap）：需關掉系統「三指拖移」才收得到
-   （系統設定 → 輔助使用 → 指標控制 → 觸控式軌跡板選項）。
-3. **三指按下**（3 Finger Click，實際壓下）：與拖移不衝突。
-4. **fn+F6** 備援（F 區是媒體鍵模式，單按 F6 會變勿擾模式，所以要加 fn）
-5. ⌃⌥V 服務選單備援
+曾試過並捨棄的方案（供參考）：
+- 三指輕按/按下：BTT 的三指手勢辨識會讓系統「三指拖移」選字慢半拍（漏掉第一個字母）
+- F6：內建鍵盤 F 區是媒體鍵，單按變勿擾
+- ⌃⌥V 服務選單：走 Automator，每次觸發多 ~1 秒
+終端機備援：`python3 tools/quick_vocab.py <word>`
 
 ## 終端機用法
 
