@@ -164,6 +164,11 @@ def local_lookup(word):
     return info
 
 
+def is_phrase(text):
+    """三個字以上或太長 → 當片語/整句處理（只翻譯，不查音標字典）。"""
+    return len(text.split()) >= 3 or len(text) > 24
+
+
 def fetch_datamuse(q):
     """主要來源：Datamuse（音標/詞性/釋義），穩定。"""
     out = {"phonetic": "", "pos": "", "definition": ""}
@@ -221,6 +226,11 @@ def lookup(word):
         "example_zh": "",
         "audio_url": "",
     }
+    # 片語/整句：音標與字典釋義無意義，直接翻譯
+    if is_phrase(word):
+        info["translation"] = translate_zh(word)
+        return info
+
     q = urllib.parse.quote(word)
 
     # 本機字典命中 → 只上網補例句（短 timeout，失敗就算了）
@@ -419,8 +429,12 @@ class VocabWindow:
                                      font=("Helvetica", 14, "bold"), fg="#b45309")
         self.status_label.pack(side="bottom", anchor="w", pady=(4, 0))
 
-        tk.Label(root, textvariable=self.word_var, font=("Helvetica", 30, "bold")).pack(anchor="w")
-        tk.Label(root, textvariable=self.phon_var, font=("Menlo", 15), fg="#6b7280").pack(anchor="w")
+        self.word_label = tk.Label(root, textvariable=self.word_var,
+                                   font=("Helvetica", 30, "bold"),
+                                   wraplength=WRAP, justify="left")
+        self.word_label.pack(anchor="w")
+        tk.Label(root, textvariable=self.phon_var, font=("Menlo", 15), fg="#6b7280",
+                 wraplength=WRAP, justify="left").pack(anchor="w")
         tk.Label(root, textvariable=self.trans_var, font=("Helvetica", 19, "bold"),
                  fg="#047857", wraplength=WRAP, justify="left").pack(anchor="w", pady=(8, 0))
         tk.Label(root, textvariable=self.def_var, font=("Helvetica", 14),
@@ -489,6 +503,10 @@ class VocabWindow:
         self.ex_var.set("")
         self.status_var.set("")
         self.add_btn.config(state="disabled", text="➕ 加入單字庫 (⏎)")
+        # 片語/整句：縮小標題字體
+        self.word_label.config(
+            font=("Helvetica", 16 if is_phrase(word) else 30, "bold")
+        )
 
         try:
             self.pointer = self.root.winfo_pointerxy()
@@ -554,10 +572,10 @@ class VocabWindow:
         """開在游標旁，但完整留在螢幕內；太靠近底部就改開在游標上方。"""
         try:
             self.root.update_idletasks()
-            w = self.root.winfo_reqwidth()
-            h = self.root.winfo_reqheight()
             sw = self.root.winfo_screenwidth()
             sh = self.root.winfo_screenheight()
+            w = min(self.root.winfo_reqwidth(), sw - 40)
+            h = min(self.root.winfo_reqheight(), sh - 80)
             px, py = self.pointer
             x = min(max(px - w // 2, 20), max(sw - w - 20, 20))
             y = py + 18                      # 預設開在游標下方
