@@ -597,6 +597,7 @@ class VocabWindow:
         try:
             if self.nsapp:
                 if activate:
+                    self.nsapp.unhideWithoutActivation()  # dismiss 時 hide 過
                     self.nsapp.activateIgnoringOtherApps_(True)
                 for w in self.nsapp.windows():
                     w.orderFrontRegardless()
@@ -734,7 +735,8 @@ class VocabWindow:
             self.on_add()
 
     def _place(self):
-        """開在游標旁，但完整留在螢幕內；太靠近底部就改開在游標上方。"""
+        """開在選字的另一側（游標在左半邊→貼右邊，反之貼左邊），和那一行切齊，
+        不蓋住選的字和正在讀的段落；兩側都放不下才退回游標上/下方。"""
         try:
             self.root.update_idletasks()
             sw = self.root.winfo_screenwidth()
@@ -742,12 +744,24 @@ class VocabWindow:
             w = min(self.root.winfo_reqwidth(), sw - 40)
             h = min(self.root.winfo_reqheight(), sh - 80)
             px, py = self.pointer
-            x = min(max(px - w // 2, 20), max(sw - w - 20, 20))
-            y = py + 18                      # 預設開在游標下方
-            if y + h > sh - 60:              # 下面放不下 → 試游標上方
-                y = py - h - 24
-            if y < 20:                       # 上面也放不下 → 貼著螢幕下緣能放下的位置
-                y = max(20, sh - h - 60)
+            gap = 60
+            right_x, left_x = sw - w - 20, 20
+            fits_right = right_x >= px + gap
+            fits_left = left_x + w <= px - gap
+            if fits_right and (px < sw / 2 or not fits_left):
+                x, side = right_x, True
+            elif fits_left:
+                x, side = left_x, True
+            else:
+                x, side = min(max(px - w // 2, 20), max(sw - w - 20, 20)), False
+            if side:
+                y = min(max(py - 40, 20), max(sh - h - 60, 20))  # 頂端和選字那行切齊
+            else:
+                y = py + 18                      # 兩側都放不下 → 游標下方
+                if y + h > sh - 60:              # 下面放不下 → 游標上方
+                    y = py - h - 24
+                if y < 20:
+                    y = max(20, sh - h - 60)
             # 明確指定尺寸：macOS 上只設位置的話，視窗高度不會跟著內容長大
             self.root.geometry(f"{w}x{h}+{x}+{y}")
         except Exception:
@@ -803,8 +817,13 @@ class VocabWindow:
     def dismiss(self):
         if self.oneshot:
             self.root.destroy()
-        else:
-            self.root.withdraw()
+            return
+        self.root.withdraw()
+        try:  # 交還焦點給原 App（Podcast），不然下一次 ⌘C 可能打到我們這裡
+            if self.nsapp is not None and self.nsapp.isActive():
+                self.nsapp.hide_(None)
+        except Exception:
+            pass
 
     # ---------- 按鈕 ----------
     def on_play(self):
@@ -897,12 +916,20 @@ def serve():
 
     # 平時每 0.3s 快取 changeCount：PRE 用「手勢前」的值當基準，
     # 就算 BTT 的 ⌘C 比 PRE 訊號先到也不會等白等
-    clip_state = {"base": pasteboard.changeCount() if pasteboard else 0}
+    # 記錄剪貼簿「最後一次變化的時間」。BTT 的 ⌘C 可能比 PRE 訊號先完成，
+    # 只比對基準值會漏掉；改看變化時間就不怕先後順序。
+    clip_state = {
+        "count": pasteboard.changeCount() if pasteboard else 0,
+        "changed_at": 0.0,
+    }
 
     def tick_clip():
         if pasteboard is not None:
-            clip_state["base"] = pasteboard.changeCount()
-        win.root.after(300, tick_clip)
+            c = pasteboard.changeCount()
+            if c != clip_state["count"]:
+                clip_state["count"] = c
+                clip_state["changed_at"] = _time.time()
+        win.root.after(50, tick_clip)
 
     tick_clip()
 
@@ -911,12 +938,13 @@ def serve():
         if pasteboard is None:
             win.root.after(200, lambda: win.show(_read_clip()))
             return
-        base = clip_state["base"]
-        # ⌘C 有時比 PRE 訊號先到：剪貼簿已經變了就直接開窗
-        if pasteboard.changeCount() != base:
+        now = _time.time()
+        # ⌘C 已在 PRE 之前完成（0.6 秒內剛變過）→ 直接開窗
+        if pasteboard.changeCount() != clip_state["count"] or now - clip_state["changed_at"] < 0.6:
             win.show(_read_clip())
             return
-        deadline = _time.time() + 0.8  # BTT 偶爾較慢，留寬一點
+        base = clip_state["count"]
+        deadline = now + 0.8  # BTT 偶爾較慢，留寬一點
 
         def poll():
             if pasteboard.changeCount() != base:
