@@ -53,14 +53,12 @@ macOS 服務機制本身每次要 ~1 秒啟動，BTT 直接執行可以壓到 ~0
 - 「Execute Terminal Command (async)」：
   `/opt/homebrew/bin/python3 /Users/yourulyu/coding/vocabcloud/tools/quick_vocab.py "$(pbpaste)"`
 
-觸發方式推薦（聽 Podcast 情境，依好按程度）：
+觸發方式：**單鍵 F6** ✅ 已設定（BTT → Keyboard Shortcuts，備註「VocabCloud 查單字 (F6)」）。
 
-1. **觸控板三指點按**（BTT → Trackpad → 3 Finger Tap）✅ 已設定：
-   雙擊選字後手不用離開觸控板，直接三指一點。
-   注意：若系統設定 → 觸控式軌跡板 → 「查詢與資料偵測」設為「三指點按」會搶手勢，
-   建議改成「用一指用力長按」或關閉。
-2. **單鍵 F6**（BTT → Keyboard Shortcuts）：F 區沒人用、單鍵免按組合
-3. ⌃⌥V：保留給服務選單當備援也行
+- 內建鍵盤的 F6 若被系統當媒體鍵（勿擾模式等），要按 **fn+F6**，
+  或到系統設定 → 鍵盤 → 把「將 F1、F2 等按鍵當作標準功能鍵」打開
+- 曾試過三指點按，但與「三指拖移」手勢衝突吃不到，故改 F6
+- ⌃⌥V 服務選單保留當備援
 
 ## 終端機用法
 
