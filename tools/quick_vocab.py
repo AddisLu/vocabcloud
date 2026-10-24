@@ -27,14 +27,19 @@ import urllib.request
 from datetime import date
 from pathlib import Path
 
-try:
-    from zhconv import convert as _zh_convert
+_zh_convert = None
 
-    def to_traditional(s):
-        return _zh_convert(s, "zh-tw")
-except ImportError:
-    def to_traditional(s):
-        return s
+
+def to_traditional(s):
+    """簡轉繁。zhconv 載入要數百 ms，延遲到第一次用到才 import。"""
+    global _zh_convert
+    if _zh_convert is None:
+        try:
+            from zhconv import convert
+            _zh_convert = convert
+        except ImportError:
+            _zh_convert = False
+    return _zh_convert(s, "zh-tw") if _zh_convert else s
 
 ECDICT_DB = Path(__file__).resolve().parent / "data" / "ecdict.db"
 
@@ -247,27 +252,13 @@ def lookup(word):
     return info
 
 
-def english_voice():
-    """找一個系統有安裝的英文語音（say 用），找不到回傳 None。"""
-    try:
-        out = subprocess.run(
-            ["say", "-v", "?"], capture_output=True, text=True, timeout=5
-        ).stdout
-        for v in ("Samantha", "Alex", "Daniel", "Karen", "Moira", "Fred"):
-            if re.search(rf"^{v}\b", out, re.MULTILINE):
-                return v
-    except Exception:
-        pass
-    return None
-
-
 def play_pronunciation(word, audio_url=""):
-    """在背景播放發音：優先用字典的真人 mp3，沒有就用系統 TTS。不阻塞。"""
+    """在背景播放發音：優先用字典的真人 mp3，沒有就用系統 TTS。
+    完全不阻塞——連英文語音偵測都在子程序做。"""
     script = f'''
-import subprocess, urllib.request, tempfile, os
+import subprocess, re, urllib.request, tempfile, os
 audio_url = {audio_url!r}
 word = {word!r}
-voice = {english_voice()!r}
 played = False
 if audio_url:
     try:
@@ -281,6 +272,15 @@ if audio_url:
     except Exception:
         pass
 if not played:
+    voice = None
+    try:
+        out = subprocess.run(["say", "-v", "?"], capture_output=True, text=True, timeout=5).stdout
+        for v in ("Samantha", "Alex", "Daniel", "Karen", "Moira", "Fred"):
+            if re.search(rf"^{{v}}\\b", out, re.MULTILINE):
+                voice = v
+                break
+    except Exception:
+        pass
     cmd = ["say"] + (["-v", voice] if voice else []) + [word]
     subprocess.run(cmd, timeout=10)
 '''
@@ -420,37 +420,52 @@ def run_gui(word):
             ex_var.set(ex)
         add_btn.config(state="normal")
 
-    # 本機字典：毫秒級，開窗就是完整資料
-    local = local_lookup(word)
-    if local:
-        local = {**{"example": "", "example_zh": "", "audio_url": ""}, **local}
-        fill(local)
+    def make_overlay():
+        """讓視窗浮在所有 Space 與全螢幕 App（如全螢幕 Podcast）之上。"""
+        try:
+            from AppKit import NSApplication
+            root.update_idletasks()
+            for win in NSApplication.sharedApplication().windows():
+                win.setLevel_(25)  # NSStatusWindowLevel：蓋過全螢幕
+                # canJoinAllSpaces (1<<0) + fullScreenAuxiliary (1<<8)
+                win.setCollectionBehavior_(win.collectionBehavior() | (1 << 0) | (1 << 8))
+        except Exception:
+            pass
 
-        def worker():  # 背景只補例句與真人發音
-            info = dict(state["info"])
-            try:
-                da = fetch_dictapi(urllib.parse.quote(info["word"]))
-                if da["example"]:
-                    info["example"] = da["example"]
-                    info["example_zh"] = translate_zh(da["example"])
-                info["audio_url"] = da["audio_url"]
-                root.after(0, fill, info)
-            except Exception:
-                pass
-    else:
-        def worker():  # 本機查不到（片語等）→ 走網路
-            info = lookup(word)
-            try:
-                root.after(0, fill, info)
-            except Exception:
-                pass  # 視窗已被關掉
+    def start():
+        """視窗畫出來之後才做的事：查字典、發音、補例句。"""
+        make_overlay()
+        play_pronunciation(word)  # 立刻用系統 TTS 唸一次，不等網路
 
-    threading.Thread(target=worker, daemon=True).start()
-    play_pronunciation(word)  # 立刻用系統 TTS 唸一次，不等網路
+        local = local_lookup(word)  # 毫秒級
+        if local:
+            fill({**{"example": "", "example_zh": "", "audio_url": ""}, **local})
+
+            def worker():  # 背景只補例句與真人發音
+                info = dict(state["info"])
+                try:
+                    da = fetch_dictapi(urllib.parse.quote(info["word"]))
+                    if da["example"]:
+                        info["example"] = da["example"]
+                        info["example_zh"] = translate_zh(da["example"])
+                    info["audio_url"] = da["audio_url"]
+                    root.after(0, fill, info)
+                except Exception:
+                    pass
+        else:
+            def worker():  # 本機查不到（片語等）→ 走網路
+                info = lookup(word)
+                try:
+                    root.after(0, fill, info)
+                except Exception:
+                    pass  # 視窗已被關掉
+
+        threading.Thread(target=worker, daemon=True).start()
 
     root.after(90_000, root.destroy)  # 90 秒沒動作自動關閉
     root.lift()
     root.focus_force()
+    root.after(1, start)  # 先讓視窗立刻畫出來，其餘延後
     root.mainloop()
 
 
