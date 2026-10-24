@@ -17,6 +17,7 @@ VocabularyLog/vocab_YYYY-MM-DD.md，之後在 VocabCloud 網頁按「☁️ Driv
 
 import concurrent.futures
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -338,139 +339,250 @@ def esc(s):
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def run_gui(word):
-    """立刻開一個浮動視窗（先顯示查詢中），查詢在背景跑完後原地更新。"""
-    import threading
-    import tkinter as tk
+SOCKET_PATH = f"/tmp/vocabcloud-{os.getuid()}.sock"
 
-    root = tk.Tk()
-    root.title("VocabCloud")
-    root.attributes("-topmost", True)
-    root.resizable(False, False)
-    root.configure(padx=22, pady=16)
 
-    # 開在滑鼠游標旁邊
-    try:
-        px, py = root.winfo_pointerxy()
-        root.geometry(f"+{max(px - 160, 20)}+{py + 18}")
-    except Exception:
-        pass
+class VocabWindow:
+    """浮動查字視窗。daemon 模式下預先建好、隱藏待命，喚醒是毫秒級。"""
 
-    WRAP = 360
-    word_var = tk.StringVar(value=word)
-    phon_var = tk.StringVar(value="")
-    trans_var = tk.StringVar(value="查詢中…")
-    def_var = tk.StringVar(value="")
-    ex_var = tk.StringVar(value="")
-    status_var = tk.StringVar(value="")
+    def __init__(self, oneshot):
+        import tkinter as tk
 
-    tk.Label(root, textvariable=word_var, font=("Helvetica", 30, "bold")).pack(anchor="w")
-    tk.Label(root, textvariable=phon_var, font=("Menlo", 15), fg="#6b7280").pack(anchor="w")
-    tk.Label(root, textvariable=trans_var, font=("Helvetica", 19, "bold"),
-             fg="#047857", wraplength=WRAP, justify="left").pack(anchor="w", pady=(8, 0))
-    tk.Label(root, textvariable=def_var, font=("Helvetica", 14),
-             wraplength=WRAP, justify="left").pack(anchor="w", pady=(6, 0))
-    tk.Label(root, textvariable=ex_var, font=("Helvetica", 13), fg="#2563eb",
-             wraplength=WRAP, justify="left").pack(anchor="w", pady=(6, 0))
-    tk.Label(root, textvariable=status_var, font=("Helvetica", 12), fg="#b45309").pack(anchor="w", pady=(4, 0))
+        self.tk = tk
+        self.oneshot = oneshot
+        self.word = ""
+        self.gen = 0          # 世代計數，避免舊查詢結果蓋掉新單字
+        self.hide_job = None
+        self.info = None
 
-    btns = tk.Frame(root)
-    btns.pack(anchor="e", pady=(12, 0))
-    state = {"info": None}
+        root = self.root = tk.Tk()
+        root.title("VocabCloud")
+        root.attributes("-topmost", True)
+        root.resizable(False, False)
+        root.configure(padx=22, pady=16)
 
-    def on_play():
-        info = state["info"]
-        play_pronunciation(word, info["audio_url"] if info else "")
+        WRAP = 360
+        self.word_var = tk.StringVar()
+        self.phon_var = tk.StringVar()
+        self.trans_var = tk.StringVar()
+        self.def_var = tk.StringVar()
+        self.ex_var = tk.StringVar()
+        self.status_var = tk.StringVar()
 
-    def on_add():
-        info = state["info"]
-        if not info:
+        tk.Label(root, textvariable=self.word_var, font=("Helvetica", 30, "bold")).pack(anchor="w")
+        tk.Label(root, textvariable=self.phon_var, font=("Menlo", 15), fg="#6b7280").pack(anchor="w")
+        tk.Label(root, textvariable=self.trans_var, font=("Helvetica", 19, "bold"),
+                 fg="#047857", wraplength=WRAP, justify="left").pack(anchor="w", pady=(8, 0))
+        tk.Label(root, textvariable=self.def_var, font=("Helvetica", 14),
+                 wraplength=WRAP, justify="left").pack(anchor="w", pady=(6, 0))
+        tk.Label(root, textvariable=self.ex_var, font=("Helvetica", 13), fg="#2563eb",
+                 wraplength=WRAP, justify="left").pack(anchor="w", pady=(6, 0))
+        tk.Label(root, textvariable=self.status_var, font=("Helvetica", 12), fg="#b45309").pack(anchor="w", pady=(4, 0))
+
+        btns = tk.Frame(root)
+        btns.pack(anchor="e", pady=(12, 0))
+        self.play_btn = tk.Button(btns, text="🔊 發音", command=self.on_play)
+        close_btn = tk.Button(btns, text="關閉", command=self.dismiss)
+        self.add_btn = tk.Button(btns, text="➕ 加入單字庫", command=self.on_add,
+                                 state="disabled", default="active")
+        self.play_btn.pack(side="left", padx=4)
+        close_btn.pack(side="left", padx=4)
+        self.add_btn.pack(side="left", padx=4)
+
+        root.bind("<Escape>", lambda e: self.dismiss())
+        root.bind("<Return>", lambda e: self.on_add())
+        root.protocol("WM_DELETE_WINDOW", self.dismiss)
+
+        self._setup_macos()
+
+    # ---------- macOS 視窗層級：跨 Space、蓋過全螢幕 App ----------
+    def _setup_macos(self):
+        self.nsapp = None
+        try:
+            from AppKit import NSApplication
+            self.nsapp = NSApplication.sharedApplication()
+            self.nsapp.setActivationPolicy_(1)  # accessory：不佔 Dock、不搶全螢幕
+            self.root.update_idletasks()
+            for w in self.nsapp.windows():
+                w.setLevel_(25)  # NSStatusWindowLevel
+                # canJoinAllSpaces (1<<0) + fullScreenAuxiliary (1<<8)
+                w.setCollectionBehavior_(w.collectionBehavior() | (1 << 0) | (1 << 8))
+        except Exception:
+            pass
+
+    def _order_front(self):
+        try:
+            if self.nsapp:
+                self.nsapp.activateIgnoringOtherApps_(True)
+                for w in self.nsapp.windows():
+                    w.orderFrontRegardless()
+                    w.makeKeyAndOrderFront_(None)
+        except Exception:
+            pass
+        self.root.lift()
+        try:
+            self.root.focus_force()
+        except Exception:
+            pass
+
+    # ---------- 顯示/隱藏 ----------
+    def show(self, word):
+        import threading
+
+        word = word.strip().strip(".,;:!?\"'()[]").strip()
+        if not word:
             return
-        ok, msg = add_to_log(info)
-        status_var.set(msg)
-        if ok:
-            add_btn.config(state="disabled")
-            root.after(1500, root.destroy)
+        self.gen += 1
+        gen = self.gen
+        self.word = word
+        self.info = None
+        self.word_var.set(word)
+        self.phon_var.set("")
+        self.trans_var.set("查詢中…")
+        self.def_var.set("")
+        self.ex_var.set("")
+        self.status_var.set("")
+        self.add_btn.config(state="disabled")
 
-    play_btn = tk.Button(btns, text="🔊 發音", command=on_play)
-    add_btn = tk.Button(btns, text="➕ 加入單字庫", command=on_add, state="disabled", default="active")
-    close_btn = tk.Button(btns, text="關閉", command=root.destroy)
-    play_btn.pack(side="left", padx=4)
-    close_btn.pack(side="left", padx=4)
-    add_btn.pack(side="left", padx=4)
+        # 開在滑鼠游標旁邊
+        try:
+            px, py = self.root.winfo_pointerxy()
+            self.root.geometry(f"+{max(px - 160, 20)}+{py + 18}")
+        except Exception:
+            pass
+        self.root.deiconify()
+        self._order_front()
+        self._reset_hide_timer()
 
-    root.bind("<Escape>", lambda e: root.destroy())
-    root.bind("<Return>", lambda e: on_add())
+        play_pronunciation(word)  # 立刻用系統 TTS 唸一次，不等網路
 
-    def fill(info):
-        state["info"] = info
+        def worker():
+            local = local_lookup(word)  # 毫秒級
+            if local:
+                info = {**{"example": "", "example_zh": "", "audio_url": ""}, **local}
+                self._post_fill(info, gen)
+                try:  # 背景補例句與真人發音
+                    da = fetch_dictapi(urllib.parse.quote(info["word"]))
+                    info = dict(info)
+                    if da["example"]:
+                        info["example"] = da["example"]
+                        info["example_zh"] = translate_zh(da["example"])
+                    info["audio_url"] = da["audio_url"]
+                    self._post_fill(info, gen)
+                except Exception:
+                    pass
+            else:  # 本機查不到（片語等）→ 走網路
+                self._post_fill(lookup(word), gen)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _post_fill(self, info, gen):
+        try:
+            self.root.after(0, lambda: self.fill(info, gen))
+        except Exception:
+            pass  # 視窗已關閉
+
+    def fill(self, info, gen):
+        if gen != self.gen:
+            return  # 已經在查別的字了
+        self.info = info
         if info["phonetic"]:
-            phon_var.set(info["phonetic"])
-        trans_var.set(info["translation"] or "（查無翻譯）")
+            self.phon_var.set(info["phonetic"])
+        self.trans_var.set(info["translation"] or "（查無翻譯）")
         parts = []
         if info["pos"]:
             parts.append(f"[{info['pos']}]")
         if info.get("definition"):
             parts.append(info["definition"])
-        def_var.set(" ".join(parts))
+        self.def_var.set(" ".join(parts))
         if info.get("example"):
             ex = info["example"]
             if info.get("example_zh"):
                 ex += f"\n{info['example_zh']}"
-            ex_var.set(ex)
-        add_btn.config(state="normal")
+            self.ex_var.set(ex)
+        self.add_btn.config(state="normal")
 
-    def make_overlay():
-        """讓視窗浮在所有 Space 與全螢幕 App（如全螢幕 Podcast）之上。"""
-        try:
-            from AppKit import NSApplication
-            root.update_idletasks()
-            for win in NSApplication.sharedApplication().windows():
-                win.setLevel_(25)  # NSStatusWindowLevel：蓋過全螢幕
-                # canJoinAllSpaces (1<<0) + fullScreenAuxiliary (1<<8)
-                win.setCollectionBehavior_(win.collectionBehavior() | (1 << 0) | (1 << 8))
-        except Exception:
-            pass
+    def _reset_hide_timer(self):
+        if self.hide_job:
+            self.root.after_cancel(self.hide_job)
+        self.hide_job = self.root.after(90_000, self.dismiss)  # 90 秒自動收起
 
-    def start():
-        """視窗畫出來之後才做的事：查字典、發音、補例句。"""
-        make_overlay()
-        play_pronunciation(word)  # 立刻用系統 TTS 唸一次，不等網路
-
-        local = local_lookup(word)  # 毫秒級
-        if local:
-            fill({**{"example": "", "example_zh": "", "audio_url": ""}, **local})
-
-            def worker():  # 背景只補例句與真人發音
-                info = dict(state["info"])
-                try:
-                    da = fetch_dictapi(urllib.parse.quote(info["word"]))
-                    if da["example"]:
-                        info["example"] = da["example"]
-                        info["example_zh"] = translate_zh(da["example"])
-                    info["audio_url"] = da["audio_url"]
-                    root.after(0, fill, info)
-                except Exception:
-                    pass
+    def dismiss(self):
+        if self.oneshot:
+            self.root.destroy()
         else:
-            def worker():  # 本機查不到（片語等）→ 走網路
-                info = lookup(word)
-                try:
-                    root.after(0, fill, info)
-                except Exception:
-                    pass  # 視窗已被關掉
+            self.root.withdraw()
 
-        threading.Thread(target=worker, daemon=True).start()
+    # ---------- 按鈕 ----------
+    def on_play(self):
+        play_pronunciation(self.word, self.info["audio_url"] if self.info else "")
 
-    root.after(90_000, root.destroy)  # 90 秒沒動作自動關閉
-    root.lift()
-    root.focus_force()
-    root.after(1, start)  # 先讓視窗立刻畫出來，其餘延後
-    root.mainloop()
+    def on_add(self):
+        if not self.info:
+            return
+        ok, msg = add_to_log(self.info)
+        self.status_var.set(msg)
+        if ok:
+            self.add_btn.config(state="disabled")
+            self.root.after(1200, self.dismiss)
+
+
+def send_to_daemon(word):
+    """把單字丟給常駐 daemon（毫秒級）。daemon 沒在跑回傳 False。"""
+    import socket
+
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        s.connect(SOCKET_PATH)
+        s.sendall(word.encode("utf-8"))
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+def serve():
+    """常駐模式：視窗預先建好藏著，socket 收到單字立刻喚醒。"""
+    import socket
+    import threading
+
+    win = VocabWindow(oneshot=False)
+    win.root.withdraw()
+
+    if Path(SOCKET_PATH).exists():
+        Path(SOCKET_PATH).unlink()
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(SOCKET_PATH)
+    srv.listen(5)
+
+    def listener():
+        while True:
+            try:
+                conn, _ = srv.accept()
+                data = conn.recv(4096).decode("utf-8", errors="ignore").strip()
+                conn.close()
+                if data:
+                    win.root.after(0, win.show, data)
+            except Exception:
+                pass
+
+    threading.Thread(target=listener, daemon=True).start()
+    win.root.mainloop()
+
+
+def run_gui(word):
+    """一次性模式（daemon 沒跑時的備援）。"""
+    win = VocabWindow(oneshot=True)
+    win.root.after(1, win.show, word)
+    win.root.mainloop()
 
 
 def main():
     args = [a for a in sys.argv[1:] if a.strip()]
+    if args and args[0] == "--serve":
+        serve()
+        return
     mode = "dialog"
     if args and args[0] in ("--add", "--lookup"):
         mode = args.pop(0)[2:]
@@ -483,7 +595,8 @@ def main():
         sys.exit(1)
 
     if mode == "dialog":
-        run_gui(word)
+        if not send_to_daemon(word):  # daemon 在跑 → 毫秒級；沒跑 → 備援
+            run_gui(word)
         return
 
     info = lookup(word)

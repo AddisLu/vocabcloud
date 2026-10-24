@@ -5,6 +5,24 @@
 加入的單字會寫進 Google Drive 本機同步資料夾 `VocabularyLog/vocab_YYYY-MM-DD.md`，
 之後在 [VocabCloud 網頁](https://addis-vocab.streamlit.app/) 按「☁️ Drive 同步」即可開始練習。
 
+## 架構：常駐 daemon（速度關鍵）
+
+`quick_vocab.py --serve` 是常駐背景程式：視窗預先建好藏著、字典連線備妥，
+觸發時只是透過 unix socket 喚醒，**0.1 秒內出現**，且視窗能浮在全螢幕 App 之上。
+daemon 沒在跑時自動退回一次性模式（較慢但可用）。
+
+開機自動啟動（裝好 plist 後執行一次）：
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.vocabcloud.quickvocab.plist
+```
+
+改過 `quick_vocab.py` 之後要重啟 daemon 才生效：
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.vocabcloud.quickvocab
+```
+
 ## 使用方式
 
 1. 在任何 App（瀏覽器、PDF、Notes…）選取英文單字
@@ -18,6 +36,17 @@
 目前設定為 **⌃⌥V**（Control+Option+V）。
 注意 ⌃⌥D 不能用——那是 macOS 內建「切換 Dock 自動隱藏」的快捷鍵，會被系統攔走。
 要改：系統設定 → 鍵盤 → 鍵盤快速鍵… → 服務 → 文字 → 「VocabCloud 查單字」。
+
+### 更快：用 BetterTouchTool 觸發（跳過 Automator 服務的 ~1 秒啟動）
+
+macOS 服務機制本身每次要 ~1 秒啟動，BTT 直接執行可以壓到 ~0.2 秒：
+
+1. BTT → Keyboard Shortcuts → 新增快捷鍵（例如 ⌃⌥V，先把服務那邊的快捷鍵移除）
+2. 加入動作序列：
+   - 「Send Keyboard Shortcut ⌘C」（複製選取的字）
+   - 短暫 delay 0.05s
+   - 「Execute Terminal Command (async)」：
+     `/opt/homebrew/bin/python3 /Users/yourulyu/coding/vocabcloud/tools/quick_vocab.py "$(pbpaste)"`
 
 ## 終端機用法
 
