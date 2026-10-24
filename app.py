@@ -186,8 +186,9 @@ def render_add_word():
 
     st.subheader("方法一：查單字浮動視窗（日常用這個）")
     st.markdown(
-        "在任何 App 選取英文單字 → 右鍵 → **服務** → 「**VocabCloud 查單字**」（可設快捷鍵）。\n\n"
-        "浮動視窗會顯示**中文翻譯＋音標＋釋義**，按「➕ 加入單字庫」就存進 Google Drive 的 `VocabularyLog`。\n\n"
+        "在任何 App 選取英文單字 → **觸控板四指輕點**。\n\n"
+        "浮動視窗會顯示**中文翻譯＋音標＋釋義**並自動發音，"
+        "按「➕ 加入單字庫」（或 ⏎）就存進 Google Drive 的 `VocabularyLog`。\n\n"
         "詳見 repo 的 `tools/README.md`。"
     )
 
