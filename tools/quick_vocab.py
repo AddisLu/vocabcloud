@@ -977,6 +977,12 @@ def _start_audio_keepalive():
         pass
 
 
+def _dbg(msg):
+    """計時紀錄寫到 daemon 的 stderr（launchd 導向 /tmp/vocabcloud-daemon.log）。"""
+    print(f"{time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d} {msg}",
+          file=sys.stderr, flush=True)
+
+
 HOTKEY_KEYCODE = 80                      # F19
 HOTKEY_MODS = 256 | 512 | 2048 | 4096    # ⌘ ⇧ ⌥ ⌃（Carbon 修飾鍵旗標）
 _hotkey_refs = []                        # 保住 ctypes callback，避免被 GC
@@ -1074,6 +1080,7 @@ def serve():
             if c != clip_state["count"]:
                 clip_state["count"] = c
                 clip_state["changed_at"] = _time.time()
+                _dbg(f"clipboard tick: count={c}")
         win.root.after(50, tick_clip)
 
     tick_clip()
@@ -1084,18 +1091,27 @@ def serve():
             win.root.after(200, lambda: win.show(_read_clip()))
             return
         now = _time.time()
-        # ⌘C 已在 PRE 之前完成（0.6 秒內剛變過）→ 直接開窗
-        if pasteboard.changeCount() != clip_state["count"] or now - clip_state["changed_at"] < 0.6:
-            win.show(_read_clip())
-            return
-        base = clip_state["count"]
-        deadline = now + 0.8  # BTT 偶爾較慢，留寬一點
+        cur = pasteboard.changeCount()
+        _dbg(f"trigger: count={cur} tracked={clip_state['count']} "
+             f"last_change={now - clip_state['changed_at']:.2f}s ago")
+        # ⌘C 已在訊號之前開始（0.6 秒內剛變過）→ 不必再等計數變化，只等內容到齊
+        already = cur != clip_state["count"] or now - clip_state["changed_at"] < 0.6
+        base = None if already else cur
+        deadline = now + 1.0  # BTT 偶爾較慢，留寬一點
 
         def poll():
-            if pasteboard.changeCount() != base:
-                win.show(_read_clip())
-            elif _time.time() > deadline:
+            # 很多 App 複製是「先清空、再寫入」：計數一跳就讀可能讀到空的，
+            # 所以要等到真的讀得到文字才開窗
+            if base is None or pasteboard.changeCount() != base:
+                text = _read_clip()
+                if text.strip():
+                    _dbg(f"show after {(_time.time() - now) * 1000:.0f}ms "
+                         f"({'already' if already else 'changed'}): {text[:30]!r}")
+                    win.show(text)
+                    return
+            if _time.time() > deadline:
                 # ⌘C 沒複製到東西（選取掉了/App 不支援）。不拿舊剪貼簿充數，免得查錯字
+                _dbg("timeout: clipboard never changed")
                 notify("VocabCloud", "沒有偵測到選取文字，請重新選字再試")
             else:
                 win.root.after(15, poll)
@@ -1118,6 +1134,8 @@ def serve():
                 conn.close()
                 if data == "PRE":
                     win.root.after(0, show_from_clipboard)
+                elif data == "DISMISS":  # 等同按 Esc（測試用）
+                    win.root.after(0, win.dismiss)
                 elif data:
                     win.root.after(0, win.show, data)
             except Exception:
@@ -1130,6 +1148,7 @@ def serve():
 
     def check_hotkey():
         if hotkey_hits:
+            _dbg(f"hotkey x{len(hotkey_hits)}")
             hotkey_hits.clear()
             show_from_clipboard()
         win.root.after(10, check_hotkey)
