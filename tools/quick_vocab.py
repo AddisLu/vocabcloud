@@ -718,16 +718,27 @@ def serve():
     tick_clip()
 
     def show_from_clipboard():
-        """等 ⌘C 更新剪貼簿（15ms 輪詢，最多 0.5s），一變就開窗。"""
+        """等 ⌘C 更新剪貼簿（15ms 輪詢，最多 0.4s），一變就開窗。"""
         if pasteboard is None:
             win.root.after(200, lambda: win.show(_read_clip()))
             return
         base = clip_state["base"]
-        deadline = _time.time() + 0.5
+        # ⌘C 有時比 PRE 訊號先到：剪貼簿已經變了就直接開窗，不空等
+        if pasteboard.changeCount() != base:
+            win.show(_read_clip())
+            return
+        deadline = _time.time() + 0.4
 
         def poll():
-            if pasteboard.changeCount() != base or _time.time() > deadline:
+            if pasteboard.changeCount() != base:
                 win.show(_read_clip())
+            elif _time.time() > deadline:
+                # ⌘C 沒複製到東西（選取掉了/App 不支援）→ 給回饋而不是沉默
+                text = _read_clip()
+                if text.strip():
+                    win.show(text)  # 退而求其次：用現有剪貼簿內容
+                else:
+                    notify("VocabCloud", "沒有偵測到選取文字，請重新選字再試")
             else:
                 win.root.after(15, poll)
 
