@@ -97,12 +97,24 @@ ECDICT_POS = {
 }
 
 
+_ecdict_con = None
+
+
+def _get_ecdict_con():
+    global _ecdict_con
+    if _ecdict_con is None:
+        _ecdict_con = sqlite3.connect(
+            f"file:{ECDICT_DB}?mode=ro", uri=True, check_same_thread=False
+        )
+    return _ecdict_con
+
+
 def local_lookup(word):
     """本機 ECDICT 離線字典，毫秒級。查到回傳部分 info dict，查不到回傳 None。"""
     if not ECDICT_DB.exists():
         return None
     try:
-        con = sqlite3.connect(f"file:{ECDICT_DB}?mode=ro", uri=True)
+        con = _get_ecdict_con()
         cur = con.cursor()
 
         def q(w):
@@ -120,7 +132,6 @@ def local_lookup(word):
                     row = q(lw[: len(lw) - len(suf)] + rep)
                     if row:
                         break
-        con.close()
     except Exception:
         return None
     if not row:
@@ -253,35 +264,52 @@ def lookup(word):
     return info
 
 
+_english_voice = None
+
+
+def get_english_voice():
+    """找系統英文語音（say 用），結果快取。約需 0.3s，daemon 啟動時先呼叫一次。"""
+    global _english_voice
+    if _english_voice is None:
+        _english_voice = ""
+        try:
+            out = subprocess.run(
+                ["say", "-v", "?"], capture_output=True, text=True, timeout=5
+            ).stdout
+            for v in ("Samantha", "Alex", "Daniel", "Karen", "Moira", "Fred"):
+                if re.search(rf"^{v}\b", out, re.MULTILINE):
+                    _english_voice = v
+                    break
+        except Exception:
+            pass
+    return _english_voice
+
+
 def play_pronunciation(word, audio_url=""):
     """在背景播放發音：優先用字典的真人 mp3，沒有就用系統 TTS。
-    完全不阻塞——連英文語音偵測都在子程序做。"""
+    沒有 mp3 時直接 Popen say（毫秒級）；有 mp3 才開子程序下載播放。"""
+    if not audio_url:
+        voice = get_english_voice()
+        cmd = ["say"] + (["-v", voice] if voice else []) + [word]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
     script = f'''
-import subprocess, re, urllib.request, tempfile, os
+import subprocess, urllib.request, tempfile, os
 audio_url = {audio_url!r}
 word = {word!r}
+voice = {get_english_voice()!r}
 played = False
-if audio_url:
-    try:
-        req = urllib.request.Request(audio_url, headers={{"User-Agent": "VocabCloud/1.0"}})
-        data = urllib.request.urlopen(req, timeout=4).read()
-        f = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-        f.write(data); f.close()
-        subprocess.run(["afplay", f.name], timeout=10)
-        os.unlink(f.name)
-        played = True
-    except Exception:
-        pass
+try:
+    req = urllib.request.Request(audio_url, headers={{"User-Agent": "VocabCloud/1.0"}})
+    data = urllib.request.urlopen(req, timeout=4).read()
+    f = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    f.write(data); f.close()
+    subprocess.run(["afplay", f.name], timeout=10)
+    os.unlink(f.name)
+    played = True
+except Exception:
+    pass
 if not played:
-    voice = None
-    try:
-        out = subprocess.run(["say", "-v", "?"], capture_output=True, text=True, timeout=5).stdout
-        for v in ("Samantha", "Alex", "Daniel", "Karen", "Moira", "Fred"):
-            if re.search(rf"^{{v}}\\b", out, re.MULTILINE):
-                voice = v
-                break
-    except Exception:
-        pass
     cmd = ["say"] + (["-v", voice] if voice else []) + [word]
     subprocess.run(cmd, timeout=10)
 '''
@@ -582,18 +610,66 @@ def send_to_daemon(word):
 
 
 def serve():
-    """常駐模式：視窗預先建好藏著，socket 收到單字立刻喚醒。"""
+    """常駐模式：視窗預先建好藏著，socket 收到訊息立刻喚醒。
+
+    協定：
+      "PRE"   → 觸發端（BTT）即將送出 ⌘C，daemon 監看剪貼簿一變就開窗（最快路徑）
+      其他文字 → 直接當單字開窗（服務選單/CLI 路徑）
+    """
     import socket
     import threading
+    import time as _time
 
     win = VocabWindow(oneshot=False)
     win.root.withdraw()
 
-    if Path(SOCKET_PATH).exists():
-        Path(SOCKET_PATH).unlink()
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(SOCKET_PATH)
-    srv.listen(5)
+    def preload():  # 把慢的初始化都在啟動時做掉：zhconv、語音偵測、字典連線
+        to_traditional("預載")
+        get_english_voice()
+        local_lookup("preload")
+
+    threading.Thread(target=preload, daemon=True).start()
+
+    try:
+        from AppKit import NSPasteboard
+        pasteboard = NSPasteboard.generalPasteboard()
+    except Exception:
+        pasteboard = None
+
+    # 平時每 0.3s 快取 changeCount：PRE 用「手勢前」的值當基準，
+    # 就算 BTT 的 ⌘C 比 PRE 訊號先到也不會等白等
+    clip_state = {"base": pasteboard.changeCount() if pasteboard else 0}
+
+    def tick_clip():
+        if pasteboard is not None:
+            clip_state["base"] = pasteboard.changeCount()
+        win.root.after(300, tick_clip)
+
+    tick_clip()
+
+    def show_from_clipboard():
+        """等 ⌘C 更新剪貼簿（15ms 輪詢，最多 0.5s），一變就開窗。"""
+        if pasteboard is None:
+            win.root.after(200, lambda: win.show(_read_clip()))
+            return
+        base = clip_state["base"]
+        deadline = _time.time() + 0.5
+
+        def poll():
+            if pasteboard.changeCount() != base or _time.time() > deadline:
+                win.show(_read_clip())
+            else:
+                win.root.after(15, poll)
+
+        poll()
+
+    def _read_clip():
+        try:
+            if pasteboard is not None:
+                return pasteboard.stringForType_("public.utf8-plain-text") or ""
+            return win.root.clipboard_get()
+        except Exception:
+            return ""
 
     def listener():
         while True:
@@ -601,11 +677,18 @@ def serve():
                 conn, _ = srv.accept()
                 data = conn.recv(4096).decode("utf-8", errors="ignore").strip()
                 conn.close()
-                if data:
+                if data == "PRE":
+                    win.root.after(0, show_from_clipboard)
+                elif data:
                     win.root.after(0, win.show, data)
             except Exception:
                 pass
 
+    if Path(SOCKET_PATH).exists():
+        Path(SOCKET_PATH).unlink()
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(SOCKET_PATH)
+    srv.listen(5)
     threading.Thread(target=listener, daemon=True).start()
     win.root.mainloop()
 
