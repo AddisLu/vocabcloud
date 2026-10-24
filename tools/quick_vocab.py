@@ -558,7 +558,6 @@ class VocabWindow:
         self.saw_active = False
         self.info = None
         self.pending_add = False
-        self.shown_at = 0.0
 
         root = self.root = tk.Tk()
         root.title("VocabCloud")
@@ -579,7 +578,7 @@ class VocabWindow:
         btns.pack(side="bottom", anchor="e", pady=(12, 0))
         self.play_btn = tk.Button(btns, text="🔊 發音 (空白鍵)", command=self.on_play)
         close_btn = tk.Button(btns, text="關閉 (Esc)", command=self.dismiss)
-        self.add_btn = tk.Button(btns, text="➕ 加入單字庫 (⌘)", command=self.on_add,
+        self.add_btn = tk.Button(btns, text="➕ 加入單字庫 (fn)", command=self.on_add,
                                  state="disabled", default="active")
         self.play_btn.pack(side="left", padx=4)
         close_btn.pack(side="left", padx=4)
@@ -605,17 +604,57 @@ class VocabWindow:
         root.bind("<Return>", lambda e: self.on_add())
         root.bind("a", lambda e: self.on_add())      # 左手無名指原位
         root.bind("A", lambda e: self.on_add())
-        for keysym in ("Meta_L", "Meta_R", "Super_L", "Super_R"):
-            try:  # 單按 ⌘ 就加入：四指點完拇指順勢一按（keysym 依 Tk 版本而異）
-                root.bind(f"<KeyPress-{keysym}>", lambda e: self._on_cmd())
-            except Exception:
-                pass
         root.bind("<space>", lambda e: self.on_play())
         root.bind("<FocusOut>", self._on_focus_out)  # 點視窗外面 → 自動關閉
         root.protocol("WM_DELETE_WINDOW", self.dismiss)
 
         self._setup_macos()
         self._setup_speech()
+        self._setup_fn_key()
+
+    def _setup_fn_key(self):
+        """單按 fn 加入單字庫。Tk 收不到單獨的 fn，改用 NSEvent 本機監聽
+        （只在本視窗作用中時觸發，不需權限）。只認「單按放開」：按住 fn 期間
+        有按其他鍵（fn+方向鍵、fn+Delete…）就不算，避免組合鍵誤觸。
+        監聽回呼發生在 Tk 處理事件途中，回呼裡碰 tkinter 會讓直譯器崩潰，
+        所以回呼只記下來，由 Tk 每 10ms 檢查。"""
+        self.fn_hits = []
+        state = {"down_at": None, "clean": False}
+        try:
+            from AppKit import NSEvent
+
+            FN_FLAG = 1 << 23            # NSEventModifierFlagFunction
+            KEYCODE_FN = 63              # kVK_Function
+            MASK = (1 << 12) | (1 << 10)  # FlagsChanged | KeyDown
+
+            def handler(event):
+                try:
+                    if event.type() == 10:  # KeyDown：fn 按住時按了別的鍵 → 是組合鍵
+                        state["clean"] = False
+                    elif event.keyCode() == KEYCODE_FN:
+                        if event.modifierFlags() & FN_FLAG:
+                            state["down_at"], state["clean"] = time.time(), True
+                        elif state["down_at"] is not None:
+                            if state["clean"] and time.time() - state["down_at"] < 0.6:
+                                self.fn_hits.append(1)
+                            state["down_at"] = None
+                except Exception:
+                    pass
+                return event
+
+            self._fn_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                MASK, handler)
+        except Exception as e:
+            _dbg(f"fn monitor failed: {e}")
+            return
+        self._poll_fn()
+
+    def _poll_fn(self):
+        if self.fn_hits:
+            self.fn_hits.clear()
+            if self.root.state() == "normal":
+                self.on_add()
+        self.root.after(10, self._poll_fn)
 
     # ---------- macOS 視窗層級：跨 Space、蓋過全螢幕 App ----------
     def _setup_macos(self):
@@ -688,11 +727,6 @@ class VocabWindow:
         except Exception:
             pass
 
-    def _on_cmd(self):
-        # BTT 送出的按鍵若殘留到本視窗：顯示後 0.15 秒內的 ⌘ 忽略（低於人的反應時間）
-        if time.time() - self.shown_at < 0.15:
-            return
-        self.on_add()
 
     # ---------- 顯示/隱藏 ----------
     # 注意：不能在 ⌘C 完成前開窗。Tk 的 deiconify 會讓本 App 變成前景，
@@ -708,14 +742,13 @@ class VocabWindow:
         self.word = word
         self.info = None
         self.pending_add = False
-        self.shown_at = time.time()
         self.word_var.set(word)
         self.phon_var.set("")
         self.trans_var.set("查詢中…")
         self.def_var.set("")
         self.ex_var.set("")
         self.status_var.set("")
-        self.add_btn.config(state="disabled", text="➕ 加入單字庫 (⌘)")
+        self.add_btn.config(state="disabled", text="➕ 加入單字庫 (fn)")
         # 片語/整句：縮小標題字體
         self.word_label.config(
             font=("Helvetica", 16 if is_phrase(word) else 30, "bold")
