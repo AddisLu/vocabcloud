@@ -23,6 +23,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from datetime import date
@@ -483,6 +484,7 @@ class VocabWindow:
         self.info = None
         self.pending_add = False
         self.preshow_active = False
+        self.shown_at = 0.0
 
         root = self.root = tk.Tk()
         root.title("VocabCloud")
@@ -531,7 +533,7 @@ class VocabWindow:
         root.bind("A", lambda e: self.on_add())
         for keysym in ("Meta_L", "Meta_R", "Super_L", "Super_R"):
             try:  # 單按 ⌘ 就加入：四指點完拇指順勢一按（keysym 依 Tk 版本而異）
-                root.bind(f"<KeyPress-{keysym}>", lambda e: self.on_add())
+                root.bind(f"<KeyPress-{keysym}>", lambda e: self._on_cmd())
             except Exception:
                 pass
         root.bind("<space>", lambda e: self.on_play())
@@ -591,20 +593,31 @@ class VocabWindow:
                 pass
         play_pronunciation(text)  # 備援：say
 
-    def _order_front(self):
+    def _order_front(self, activate=True):
+        """activate=False：只浮到最上層、不搶焦點（BTT 的 ⌘C 還要送到原 App）。"""
         try:
             if self.nsapp:
-                self.nsapp.activateIgnoringOtherApps_(True)
+                if activate:
+                    self.nsapp.activateIgnoringOtherApps_(True)
                 for w in self.nsapp.windows():
                     w.orderFrontRegardless()
-                    w.makeKeyAndOrderFront_(None)
+                    if activate:
+                        w.makeKeyAndOrderFront_(None)
         except Exception:
             pass
+        if not activate:
+            return
         self.root.lift()
         try:
             self.root.focus_force()
         except Exception:
             pass
+
+    def _on_cmd(self):
+        # BTT 送 ⌘C 時的 ⌘ 可能落到本視窗：顯示後 0.3 秒內的 ⌘ 一律忽略
+        if time.time() - self.shown_at < 0.3:
+            return
+        self.on_add()
 
     # ---------- 顯示/隱藏 ----------
     def preshow(self):
@@ -623,10 +636,10 @@ class VocabWindow:
         except Exception:
             self.pointer = (200, 200)
         self._place()
+        self.shown_at = time.time()
         self.root.deiconify()
-        self._order_front()
+        self._order_front(activate=False)  # 不搶焦點，讓 ⌘C 送到原 App
         self._reset_hide_timer()
-        self._watch_focus()
 
     def show(self, word):
         import threading
@@ -932,13 +945,11 @@ def serve():
             if pasteboard.changeCount() != base:
                 win.show(_read_clip())
             elif _time.time() > deadline:
-                # ⌘C 沒複製到東西（選取掉了/App 不支援）→ 給回饋而不是沉默
-                text = _read_clip()
-                if text.strip():
-                    win.show(text)  # 退而求其次：用現有剪貼簿內容
-                else:
-                    win.dismiss()
-                    notify("VocabCloud", "沒有偵測到選取文字，請重新選字再試")
+                # ⌘C 沒複製到東西（選取掉了/App 不支援）。不拿舊剪貼簿充數，免得查錯字
+                win.preshow_active = False
+                win.pending_add = False
+                win.dismiss()
+                notify("VocabCloud", "沒有偵測到選取文字，請重新選字再試")
             else:
                 win.root.after(15, poll)
 
