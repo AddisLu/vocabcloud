@@ -37,7 +37,6 @@ launchctl kickstart -k gui/$(id -u)/com.vocabcloud.quickvocab
 2. 右鍵 → **服務** → **VocabCloud 查單字**（或用下面設定的快捷鍵）
 3. 浮動視窗顯示：音標、中文翻譯、詞性、英中釋義、例句，並自動唸一次
 4. 視窗內快速鍵：**空白鍵** 重播發音、**P** 在整句與偵測到的片語卡之間切換、
-   **G** 用瀏覽器開 Google 翻譯（翻譯怪怪的時候）、
    **單按 fn**（或 A、⏎）加入單字庫並自動關窗（按鍵看硬體鍵碼，注音輸入法下也能用）、
    **Esc** 關閉，**點視窗外任何地方也會自動關閉**（點回原 App 時焦點直接回去）
 5. 按「➕ 加入單字庫」後到 VocabCloud 網頁按「☁️ Drive 同步」匯入（重複的字會自動擋掉）
@@ -104,5 +103,7 @@ cp -R "tools/VocabCloud 查單字.workflow" ~/Library/Services/
   （其詞庫含 Wiktionary 片語條目），有釋義的就是片語，約 0.1~0.4s。主條目維持整句，
   偵測到的片語列在下方，按 **P** 才切成片語卡（片語為主條目、原句變例句，再按 P 輪到下一個／回整句），
   fn 加入的是當下顯示的那張
-- 例句＋真人發音 mp3：[dictionaryapi.dev](https://dictionaryapi.dev/)（服務不穩，抓不到就略過）
+- 例句：單字由 Google 一併帶回（dt=ex）；片語卡若你選的只是片語本身，向 Wiktionary 要例句（~1s 背景）；
+  你選的是含上下文的句子時，直接拿那句當片語的例句
+- 真人發音 mp3／備用例句：[dictionaryapi.dev](https://dictionaryapi.dev/)（服務不穩，抓不到就略過）
 - 發音：常駐語音子程序（Samantha），開窗即唸；按「🔊」重播，有真人 mp3 就播 mp3

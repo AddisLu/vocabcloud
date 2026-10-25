@@ -51,11 +51,15 @@ def google_lookup(text, timeout=5):
     """Google 翻譯免金鑰端點，一次拿：翻譯(t)、詞性＋其他譯法(bd)、英文釋義(md)。
     單字與整句都走這裡（長文品質比字典好）。回傳 dict，失敗會丟例外。"""
     q = urllib.parse.quote(text)
-    dts = "&dt=t" if " " in text.strip() else "&dt=t&dt=bd&dt=md"  # 整句沒有詞性/釋義，少傳
+    single = " " not in text.strip()
+    dts = "&dt=t&dt=bd&dt=md&dt=ex" if single else "&dt=t"  # 整句沒有詞性/釋義/例句，少傳
     data = http_json(
         "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW"
         f"{dts}&q={q}", timeout=timeout)
-    out = {"translation": "", "pos": "", "definition": "", "alternatives": []}
+    out = {"translation": "", "pos": "", "definition": "", "alternatives": [], "example": ""}
+    ex = data[13] if len(data) > 13 else None
+    if ex and ex[0]:
+        out["example"] = re.sub(r"<[^>]+>", "", ex[0][0][0]).strip()
     zh = "".join(seg[0] for seg in (data[0] or []) if seg and seg[0]).strip()
     if zh and zh.lower() != text.strip().lower():
         out["translation"] = zh
@@ -73,6 +77,49 @@ def google_lookup(text, timeout=5):
             if not out["pos"] and entry[0]:
                 out["pos"] = POS_ZH.get(entry[0], entry[0])
     return out
+
+
+def wiktionary_example(phrase):
+    """Wiktionary 的片語條目常附例句（crack down、look forward to…）。約 0.5~1.2s，背景用。"""
+    q = urllib.parse.quote(phrase)
+    data = http_json(f"https://en.wiktionary.org/api/rest_v1/page/definition/{q}", timeout=6)
+    for entry in data.get("en", []):
+        for d in entry.get("definitions", []):
+            for x in d.get("parsedExamples") or []:
+                s = re.sub(r"<[^>]+>", "", x.get("example", "")).strip()
+                if s:
+                    return s
+            for x in d.get("examples") or []:
+                s = re.sub(r"<[^>]+>", "", x).strip()
+                if s:
+                    return s
+    return ""
+
+
+def tatoeba_example(word):
+    """Tatoeba 例句庫（最後備援；句子偏短）。"""
+    q = urllib.parse.quote(word)
+    data = http_json(f"https://tatoeba.org/en/api_v0/search?from=eng&query={q}&limit=3&sort=relevance",
+                     timeout=6)
+    for r in data.get("results", []):
+        s = (r.get("text") or "").strip()
+        if s and word.lower() in s.lower():
+            return s
+    return ""
+
+
+def fetch_example_fallback(word, q):
+    """單字例句備援鏈：dictionaryapi → Wiktionary → Tatoeba。都沒有回空字串。"""
+    for src in (lambda: fetch_dictapi(q)["example"],
+                lambda: wiktionary_example(word),
+                lambda: tatoeba_example(word)):
+        try:
+            ex = src()
+        except Exception:
+            ex = ""
+        if ex:
+            return ex
+    return ""
 
 
 def translate_zh(text):
@@ -261,6 +308,8 @@ def lookup(word):
         except Exception:
             info["phrases"] = []
         return info
+    if not info["example"]:
+        info["example"] = fetch_example_fallback(word, q)
     if info["example"]:
         info["example_zh"] = translate_zh(info["example"])
     return info
@@ -411,13 +460,11 @@ class VocabWindow:
         self.play_btn = tk.Button(btns, text="🔊 發音 (空白鍵)", command=self.on_play)
         self.phrase_btn = tk.Button(btns, text="🧩 片語 (P)", command=self.on_phrase,
                                     state="disabled")
-        web_btn = tk.Button(btns, text="🌐 Google 翻譯 (G)", command=self.on_google)
         close_btn = tk.Button(btns, text="關閉 (Esc)", command=self.dismiss)
         self.add_btn = tk.Button(btns, text="➕ 加入單字庫 (fn)", command=self.on_add,
                                  state="disabled", default="active")
         self.play_btn.pack(side="left", padx=4)
         self.phrase_btn.pack(side="left", padx=4)
-        web_btn.pack(side="left", padx=4)
         close_btn.pack(side="left", padx=4)
         self.add_btn.pack(side="left", padx=4)
         self.status_label = tk.Label(root, textvariable=self.status_var,
@@ -446,7 +493,7 @@ class VocabWindow:
         def tk_key(action):
             def h(_e):
                 if not self._keys_native:
-                    {"add": self.on_add, "google": self.on_google, "play": self.on_play,
+                    {"add": self.on_add, "play": self.on_play,
                      "dismiss": self.dismiss, "phrase": self.on_phrase}[action]()
             return h
 
@@ -457,8 +504,6 @@ class VocabWindow:
         root.bind("<space>", tk_key("play"))
         root.bind("p", tk_key("phrase"))
         root.bind("P", tk_key("phrase"))
-        root.bind("g", tk_key("google"))
-        root.bind("G", tk_key("google"))
         root.bind("<FocusOut>", self._on_focus_out)  # 點視窗外面 → 自動關閉
         root.protocol("WM_DELETE_WINDOW", self.dismiss)
 
@@ -483,8 +528,7 @@ class VocabWindow:
             MASK = (1 << 12) | (1 << 10)  # FlagsChanged | KeyDown
             # 視窗內快速鍵改看「硬體鍵碼」：注音等輸入法會把字母鍵攔去組字，
             # Tk 的 "g"/"a" 綁定永遠收不到。鍵碼不經輸入法。
-            KEY_ACTIONS = {0: "add", 5: "google", 35: "phrase", 49: "play", 53: "dismiss",
-                           36: "add"}
+            KEY_ACTIONS = {0: "add", 35: "phrase", 49: "play", 53: "dismiss", 36: "add"}
             MOD_MASK = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20)  # ⇧⌃⌥⌘
 
             def handler(event):
@@ -524,7 +568,7 @@ class VocabWindow:
             self.key_hits.clear()
             if self.root.state() == "normal":
                 for a in actions:
-                    {"add": self.on_add, "google": self.on_google, "play": self.on_play,
+                    {"add": self.on_add, "play": self.on_play,
                      "dismiss": self.dismiss, "phrase": self.on_phrase}[a]()
         self.root.after(10, self._poll_fn)
 
@@ -657,13 +701,23 @@ class VocabWindow:
                     matches = find_phrases(word)
                 except Exception as e:
                     _dbg(f"phrase detect failed: {e}")
-                    return
+                    matches = []
                 if matches:
                     _dbg(f"phrases: {[m['word'] for m in matches]}")
-                    merge(phrases=matches)
+                merge(phrases=matches, complete=True)
                 return
 
             q = urllib.parse.quote(word)
+            # 三個背景來源都結束才標記 complete：練習系統需要音標/詞性/釋義/例句/翻譯齊全，
+            # 「加入」會等到 complete 才真的寫入
+            left = {"n": 3}
+
+            def done():
+                with lock:
+                    left["n"] -= 1
+                    last = left["n"] == 0
+                if last:
+                    merge(complete=True)
 
             def phon():  # 音標（Datamuse，穩定）
                 try:
@@ -676,20 +730,35 @@ class VocabWindow:
                         merge(**fields)
                 except Exception:
                     pass
+                finally:
+                    done()
 
-            def extra():  # 例句 + 真人發音（dictionaryapi.dev，常掛就算了）
+            def example():  # 例句：Google 有就只翻譯；沒有走備援鏈 dictionaryapi→Wiktionary→Tatoeba
+                try:
+                    with lock:
+                        ex = cur.get("example", "")
+                    if not ex:
+                        ex = fetch_example_fallback(word, q)
+                    if ex:
+                        merge(example=ex, example_zh=translate_zh(ex))
+                    else:
+                        _dbg(f"no example found for {word!r}")
+                finally:
+                    done()
+
+            def extra():  # 真人發音 + 較標準音標（dictionaryapi.dev，常掛就算了）
                 try:
                     da = fetch_dictapi(q)
                     fields = {"audio_url": da["audio_url"]}
                     if da["phonetic"]:
                         fields["phonetic"] = da["phonetic"]
-                    if da["example"]:
-                        fields["example"] = da["example"]
-                        fields["example_zh"] = translate_zh(da["example"])
                     merge(**fields)
                 except Exception:
                     pass
+                finally:
+                    done()
 
+            threading.Thread(target=example, daemon=True).start()
             threading.Thread(target=phon, daemon=True).start()
             threading.Thread(target=extra, daemon=True).start()
 
@@ -739,7 +808,7 @@ class VocabWindow:
         self.phrase_btn.config(state="normal" if phrases else "disabled")
         self.add_btn.config(state="normal")
         self._place()  # 內容變多視窗會長高，重新調整避免超出螢幕
-        if self.pending_add:  # 資料還沒好時使用者就按了 ⌘ → 現在自動完成加入
+        if self.pending_add and info.get("complete"):  # 資料齊了 → 完成先前按下的加入
             self.pending_add = False
             self.on_add()
 
@@ -853,44 +922,90 @@ class VocabWindow:
             return
         m = phrases[self.phrase_idx]
         _dbg(f"phrase card {self.phrase_idx + 1}/{len(phrases)}: {m['word']!r}")
-        card = {**base, **m, "is_phrase_card": True, "translation": "",
-                "example": base["word"], "example_zh": base.get("translation", ""),
+        # 你選的若是含上下文的句子，就拿它當例句；若只選了片語本身，例句另外向 Wiktionary 要
+        has_context = len(base["word"].split()) >= len(m["word"].split()) + 2
+        card = {**base, **m, "is_phrase_card": True, "translation": "", "complete": False,
+                "example": base["word"] if has_context else "",
+                "example_zh": base.get("translation", "") if has_context else "",
                 "alternatives": [], "audio_url": ""}
         self.fill(card, self.gen)
         self._speak(m["word"])
         gen = self.gen
+        state = {"card": card, "left": 1 if has_context else 2}
+        import threading
+        ulock = threading.Lock()
+
+        def update(**fields):
+            with ulock:
+                if self.info is not state["card"]:  # 已切到別張卡
+                    return
+                state["card"] = {**state["card"], **fields}
+                snap = state["card"]
+            self._post_fill(snap, gen)
+
+        def done():
+            with ulock:
+                state["left"] -= 1
+                last = state["left"] == 0
+            if last:
+                update(complete=True)
 
         def fetch_zh():  # 片語中譯（~60ms）
             try:
                 zh = google_lookup(m["word"])["translation"]
+                if zh:
+                    update(translation=zh)
             except Exception:
-                zh = ""
-            if zh and self.info is card:
-                self._post_fill({**card, "translation": zh}, gen)
+                pass
+            finally:
+                done()
 
-        import threading
+        def fetch_example():  # 片語例句（Wiktionary → Tatoeba）＋ 中譯
+            try:
+                ex = ""
+                for src in (lambda: wiktionary_example(m["word"]), lambda: tatoeba_example(m["word"])):
+                    try:
+                        ex = src()
+                    except Exception:
+                        ex = ""
+                    if ex:
+                        break
+                if ex:
+                    update(example=ex, example_zh=translate_zh(ex))
+            finally:
+                done()
+
         threading.Thread(target=fetch_zh, daemon=True).start()
-
-    def on_google(self):
-        """翻譯怪怪的時候：用瀏覽器開 Google 翻譯帶入目前的字。"""
-        url = ("https://translate.google.com/?sl=en&tl=zh-TW&op=translate&text="
-               + urllib.parse.quote(self._current_word()))
-        subprocess.Popen(["open", url])
-        self.dismiss()
+        if not has_context:
+            threading.Thread(target=fetch_example, daemon=True).start()
 
     def on_play(self):
         self._speak(self._current_word(), self.info.get("audio_url", "") if self.info else "")
 
     def on_add(self):
-        if not self.info:  # 查詢還沒完成：立刻關窗，fill() 完成後在背景自動加入
-            self.pending_add = True
+        if not self.info or not self.info.get("complete"):
+            # 資料還沒齊（例句/翻譯還在抓）：立刻關窗，齊了在背景寫入；
+            # 最多等 8 秒，超過就用現有資料寫入，不讓它卡住
+            if not self.pending_add:
+                self.pending_add = True
+                gen = self.gen
+
+                def force():
+                    if self.pending_add and self.gen == gen and self.info:
+                        _dbg("add: sources slow, writing what we have")
+                        self.pending_add = False
+                        self._write_card(self.info)
+
+                self.root.after(8000, force)
             if self.oneshot:  # 一次性模式關窗=程式結束，只能留窗等
                 self.status_label.config(fg="#6b7280")
                 self.status_var.set("⏳ 查詢中，完成後自動加入…")
             else:
                 self.dismiss()  # daemon 模式：視窗先收，結果看系統通知
             return
-        info = self.info
+        self._write_card(self.info)
+
+    def _write_card(self, info):
         if self.oneshot:  # 一次性模式關窗=程式結束，只能先寫完再關
             ok, msg = add_to_log(info)
             notify("VocabCloud", msg)
