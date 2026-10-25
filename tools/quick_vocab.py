@@ -101,6 +101,88 @@ def is_phrase(text):
     return len(text.split()) >= 3 or len(text) > 24
 
 
+_STOPWORDS = {"a", "an", "the", "is", "are", "was", "were", "be", "been", "it",
+              "its", "this", "that", "what", "who", "and", "or", "but", "so",
+              "of", "to", "in", "on", "at", "as", "by", "he", "she", "they", "we",
+              "his", "her", "their", "my", "your"}
+
+
+def _word_forms(w):
+    """還原常見字尾變化：sets→set、looking→look…（含原形）"""
+    forms = [w]
+    for suf, rep in (("ies", "y"), ("es", ""), ("s", ""), ("ing", ""),
+                     ("ing", "e"), ("ed", ""), ("ed", "e")):
+        if w.endswith(suf) and len(w) - len(suf) >= 2:
+            forms.append(w[: len(w) - len(suf)] + rep)
+    return forms
+
+
+def datamuse_phrase(phrase):
+    """Datamuse 的詞庫含 Wiktionary 片語條目。精確命中且有釋義才算片語，回傳 info 或 None。"""
+    q = urllib.parse.quote(phrase)
+    res = http_json(f"https://api.datamuse.com/words?sp={q}&qe=sp&md=dr&ipa=1&max=1", timeout=4)
+    if not res or res[0].get("word", "").lower() != phrase.lower() or not res[0].get("defs"):
+        return None
+    pos, _, d = res[0]["defs"][0].partition("\t")
+    info = {"word": res[0]["word"], "pos": POS_ZH.get(pos.strip(), pos.strip()),
+            "definition": d.strip(), "phonetic": ""}
+    for tag in res[0].get("tags", []):
+        if tag.startswith("ipa_pron:"):
+            info["phonetic"] = f"/{tag.split(':', 1)[1].strip()}/"
+            break
+    return info
+
+
+def find_phrases(text, limit=3):
+    """在一段選取文字中自動偵測片語（線上，Datamuse，候選並行查，整句約 0.3s）。
+
+    候選：2~4 字的連續組合，以及「動詞 … 介係詞」隔 1~2 個字的組合
+    （sets Xiang apart → set apart），第一個字做字尾還原。長的/連續的優先。
+    """
+    words = [w.lower() for w in re.findall(r"[A-Za-z']+", text)]
+    n = len(words)
+    cands = []  # (score, phrase)
+    for i in range(n):
+        for length in (3, 2):  # 4 字片語少見，為了速度不查
+            if i + length <= n:
+                rest = words[i + 1: i + length]
+                for f in _word_forms(words[i]):
+                    cands.append((length * 10, " ".join([f] + rest)))
+        if words[i] not in _STOPWORDS:  # 隔字動詞片語：動詞 … 介係詞
+            for gap in (1, 2):
+                j = i + gap + 1
+                if j < n and words[j] not in _STOPWORDS - {"to", "on", "in", "at", "by", "of"}:
+                    for f in _word_forms(words[i]):
+                        cands.append((15, f"{f} {words[j]}"))
+    seen, todo = set(), []
+    for score, ph in sorted(cands, key=lambda c: -c[0]):
+        parts = ph.split()
+        if ph in seen or all(p in _STOPWORDS for p in parts) or parts[-1] in {"a", "an", "the"}:
+            continue
+        seen.add(ph)
+        todo.append((score, ph))
+    todo = todo[:48]
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=24) as ex:
+        futs = {ex.submit(datamuse_phrase, ph): (score, ph) for score, ph in todo}
+        for fut in concurrent.futures.as_completed(futs):
+            try:
+                info = fut.result()
+            except Exception:
+                info = None
+            if info:
+                results.append((futs[fut][0], info))
+    results.sort(key=lambda r: -r[0])
+    # 同一片語的不同變化形（looking forward to / look forward to）只留最長的一個
+    out = []
+    for _, info in results:
+        if not any(info["word"] in o["word"] or o["word"] in info["word"] for o in out):
+            out.append(info)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def fetch_datamuse(q):
     """主要來源：Datamuse（音標/詞性/釋義），穩定。"""
     out = {"phonetic": "", "pos": "", "definition": ""}
@@ -173,6 +255,12 @@ def lookup(word):
                 info["example"], info["audio_url"] = da["example"], da["audio_url"]
             except Exception:
                 pass
+    if not single:  # 片語/整句：主條目維持整句，另列出偵測到的片語
+        try:
+            info["phrases"] = find_phrases(word)
+        except Exception:
+            info["phrases"] = []
+        return info
     if info["example"]:
         info["example_zh"] = translate_zh(info["example"])
     return info
@@ -321,11 +409,14 @@ class VocabWindow:
         btns = tk.Frame(root)
         btns.pack(side="bottom", anchor="e", pady=(12, 0))
         self.play_btn = tk.Button(btns, text="🔊 發音 (空白鍵)", command=self.on_play)
+        self.phrase_btn = tk.Button(btns, text="🧩 片語 (P)", command=self.on_phrase,
+                                    state="disabled")
         web_btn = tk.Button(btns, text="🌐 Google 翻譯 (G)", command=self.on_google)
         close_btn = tk.Button(btns, text="關閉 (Esc)", command=self.dismiss)
         self.add_btn = tk.Button(btns, text="➕ 加入單字庫 (fn)", command=self.on_add,
                                  state="disabled", default="active")
         self.play_btn.pack(side="left", padx=4)
+        self.phrase_btn.pack(side="left", padx=4)
         web_btn.pack(side="left", padx=4)
         close_btn.pack(side="left", padx=4)
         self.add_btn.pack(side="left", padx=4)
@@ -356,7 +447,7 @@ class VocabWindow:
             def h(_e):
                 if not self._keys_native:
                     {"add": self.on_add, "google": self.on_google, "play": self.on_play,
-                     "dismiss": self.dismiss}[action]()
+                     "dismiss": self.dismiss, "phrase": self.on_phrase}[action]()
             return h
 
         root.bind("<Escape>", tk_key("dismiss"))
@@ -364,6 +455,8 @@ class VocabWindow:
         root.bind("a", tk_key("add"))      # 左手無名指原位
         root.bind("A", tk_key("add"))
         root.bind("<space>", tk_key("play"))
+        root.bind("p", tk_key("phrase"))
+        root.bind("P", tk_key("phrase"))
         root.bind("g", tk_key("google"))
         root.bind("G", tk_key("google"))
         root.bind("<FocusOut>", self._on_focus_out)  # 點視窗外面 → 自動關閉
@@ -390,7 +483,8 @@ class VocabWindow:
             MASK = (1 << 12) | (1 << 10)  # FlagsChanged | KeyDown
             # 視窗內快速鍵改看「硬體鍵碼」：注音等輸入法會把字母鍵攔去組字，
             # Tk 的 "g"/"a" 綁定永遠收不到。鍵碼不經輸入法。
-            KEY_ACTIONS = {0: "add", 5: "google", 49: "play", 53: "dismiss", 36: "add"}
+            KEY_ACTIONS = {0: "add", 5: "google", 35: "phrase", 49: "play", 53: "dismiss",
+                           36: "add"}
             MOD_MASK = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20)  # ⇧⌃⌥⌘
 
             def handler(event):
@@ -431,7 +525,7 @@ class VocabWindow:
             if self.root.state() == "normal":
                 for a in actions:
                     {"add": self.on_add, "google": self.on_google, "play": self.on_play,
-                     "dismiss": self.dismiss}[a]()
+                     "dismiss": self.dismiss, "phrase": self.on_phrase}[a]()
         self.root.after(10, self._poll_fn)
 
     # ---------- macOS 視窗層級：跨 Space、蓋過全螢幕 App ----------
@@ -507,7 +601,10 @@ class VocabWindow:
         gen = self.gen
         self.word = word
         self.info = None
+        self.base_info = None
+        self.phrase_idx = -1  # -1 = 顯示整句；0.. = 第幾個片語卡
         self.pending_add = False
+        self.phrase_btn.config(state="disabled")
         self.word_var.set(word)
         self.phon_var.set("")
         self.trans_var.set("查詢中…")
@@ -554,7 +651,17 @@ class VocabWindow:
                 _dbg(f"google lookup failed: {e}")
                 merge(translation=translate_zh(word))  # MyMemory 備援
             if " " in word.strip():
-                return  # 片語/整句：只需翻譯
+                # 片語/整句：主條目維持整句；背景偵測句中的片語（Datamuse，~0.3s）
+                # 只列出來，由使用者按 P 決定要不要切成片語卡
+                try:
+                    matches = find_phrases(word)
+                except Exception as e:
+                    _dbg(f"phrase detect failed: {e}")
+                    return
+                if matches:
+                    _dbg(f"phrases: {[m['word'] for m in matches]}")
+                    merge(phrases=matches)
+                return
 
             q = urllib.parse.quote(word)
 
@@ -598,13 +705,14 @@ class VocabWindow:
         if gen != self.gen:
             return  # 已經在查別的字了
         self.info = info
-        if info["word"] != self.word:  # 片語偵測把主條目換成了字典片語
+        if not info.get("is_phrase_card"):
+            self.base_info = info  # 整句的資料，按 P 切片語卡後還能切回來
+        if info["word"] != self.word_var.get():  # 切片語卡 / 切回整句
             self.word_var.set(info["word"])
             self.word_label.config(
                 font=("Helvetica", 16 if is_phrase(info["word"]) else 30, "bold")
             )
-        if info["phonetic"]:
-            self.phon_var.set(info["phonetic"])
+        self.phon_var.set(info.get("phonetic") or "")
         self.trans_var.set(info["translation"] or "（查無翻譯）")
         parts = []
         if info["pos"]:
@@ -613,13 +721,22 @@ class VocabWindow:
             # 視窗只顯示英文釋義；中文翻譯上面綠字已有，不重複（存進字庫仍是完整版）
             parts.append(info["definition"].split(" / ")[0])
         self.def_var.set(" ".join(parts))
-        if info.get("example"):
-            ex = info["example"]
-            if info.get("example_zh"):
-                ex += f"\n{info['example_zh']}"
-            self.ex_var.set(ex)
+        ex = info.get("example") or ""
+        if ex and info.get("example_zh"):
+            ex += f"\n{info['example_zh']}"
+        self.ex_var.set(ex)
+        phrases = info.get("phrases") or []
         if info.get("alternatives"):
             self.google_var.set("其他譯法：" + "、".join(info["alternatives"]))
+        elif phrases:
+            names = "、".join(m["word"] for m in phrases)
+            if info.get("is_phrase_card"):
+                self.google_var.set(f"🧩 片語 {self.phrase_idx + 1}/{len(phrases)}：{names}（P 切換／回整句）")
+            else:
+                self.google_var.set(f"🧩 偵測到片語：{names}（按 P 切成片語卡）")
+        else:
+            self.google_var.set("")
+        self.phrase_btn.config(state="normal" if phrases else "disabled")
         self.add_btn.config(state="normal")
         self._place()  # 內容變多視窗會長高，重新調整避免超出螢幕
         if self.pending_add:  # 資料還沒好時使用者就按了 ⌘ → 現在自動完成加入
@@ -718,15 +835,51 @@ class VocabWindow:
             pass
 
     # ---------- 按鈕 ----------
+    def _current_word(self):
+        return self.info["word"] if self.info else self.word
+
+    def on_phrase(self):
+        """P：在「整句」和偵測到的各片語卡之間輪流切換。
+        片語卡 = 片語當主條目（詞性/釋義/音標來自 Datamuse，中譯向 Google 查），
+        原句變例句；fn 加入的就是當下顯示的這張。"""
+        base = self.base_info
+        phrases = (base or {}).get("phrases") or []
+        if not phrases:
+            return
+        self.phrase_idx += 1
+        if self.phrase_idx >= len(phrases):
+            self.phrase_idx = -1
+            self.fill(base, self.gen)  # 回到整句
+            return
+        m = phrases[self.phrase_idx]
+        _dbg(f"phrase card {self.phrase_idx + 1}/{len(phrases)}: {m['word']!r}")
+        card = {**base, **m, "is_phrase_card": True, "translation": "",
+                "example": base["word"], "example_zh": base.get("translation", ""),
+                "alternatives": [], "audio_url": ""}
+        self.fill(card, self.gen)
+        self._speak(m["word"])
+        gen = self.gen
+
+        def fetch_zh():  # 片語中譯（~60ms）
+            try:
+                zh = google_lookup(m["word"])["translation"]
+            except Exception:
+                zh = ""
+            if zh and self.info is card:
+                self._post_fill({**card, "translation": zh}, gen)
+
+        import threading
+        threading.Thread(target=fetch_zh, daemon=True).start()
+
     def on_google(self):
         """翻譯怪怪的時候：用瀏覽器開 Google 翻譯帶入目前的字。"""
         url = ("https://translate.google.com/?sl=en&tl=zh-TW&op=translate&text="
-               + urllib.parse.quote(self.word))
+               + urllib.parse.quote(self._current_word()))
         subprocess.Popen(["open", url])
         self.dismiss()
 
     def on_play(self):
-        self._speak(self.word, self.info.get("audio_url", "") if self.info else "")
+        self._speak(self._current_word(), self.info.get("audio_url", "") if self.info else "")
 
     def on_add(self):
         if not self.info:  # 查詢還沒完成：立刻關窗，fill() 完成後在背景自動加入
