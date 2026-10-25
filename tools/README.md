@@ -86,26 +86,18 @@ python3 tools/quick_vocab.py --lookup resilient # 只印查詢結果 (JSON)
 ## 安裝（換新電腦時）
 
 ```bash
-# 1. 快速動作
 cp -R "tools/VocabCloud 查單字.workflow" ~/Library/Services/
 /System/Library/CoreServices/pbs -update
 
-# 2. 離線字典 ECDICT（毫秒級查詢的關鍵，812MB，不進 git）
-curl -L -o /tmp/ecdict.zip "https://github.com/skywind3000/ECDICT/releases/download/1.0.28/ecdict-sqlite-28.zip"
-unzip /tmp/ecdict.zip -d /tmp/ecdict && mv /tmp/ecdict/stardict.db tools/data/ecdict.db
 
-# 3. 簡轉繁套件（OpenCC s2twp：台灣正體+台灣用語；ECDICT 原文是簡體，
-#    開源界沒有同等規模的原生繁體離線英漢字典，故採轉換）
-python3 -m pip install --user --break-system-packages opencc-python-reimplemented
 ```
 
 注意 `.workflow` 裡的 script 路徑與 `quick_vocab.py` 裡的 `VOCAB_LOG_DIR` 寫死了本機路徑，換電腦要改。
 
-## 資料來源
+## 資料來源（全部線上、免 API Key；MacBook Air 空間有限，不放離線字典）
 
-- **翻譯/音標/詞性/釋義：本機 [ECDICT](https://github.com/skywind3000/ECDICT) 離線字典（毫秒級，開窗即顯示）**，簡轉繁用 OpenCC；
-  變化形（courses、running）一律用原形的翻譯（ECDICT 的變化形條目常只有冷僻義）
-- 單字同時在背景向 Google 翻譯取第二意見，約 0.1 秒後多顯示一行「🌐 Google：…」供對照
-- 例句＋真人發音 mp3：[dictionaryapi.dev](https://dictionaryapi.dev/)（背景補上，服務不穩就略過）
-- 本機查不到的字/片語才走網路：翻譯以 Google 免金鑰端點優先、MyMemory 備援；[Datamuse](https://www.datamuse.com/api/) + [MyMemory](https://mymemory.translated.net/doc/spec.php)
-- 發音：開窗自動唸一次（系統 TTS），按「🔊 發音」重播（有真人 mp3 就播 mp3）
+- **翻譯 / 詞性 / 英文釋義 / 其他譯法：Google 翻譯免金鑰端點**（單字與整句都走這裡，長文品質好；
+  實測單字 ~0.1s、整句 ~0.2s，開窗後即顯示）。Google 失敗改用 MyMemory
+- 音標（IPA）：[Datamuse](https://www.datamuse.com/api/)，背景並行補上
+- 例句＋真人發音 mp3：[dictionaryapi.dev](https://dictionaryapi.dev/)（服務不穩，抓不到就略過）
+- 發音：常駐語音子程序（Samantha），開窗即唸；按「🔊」重播，有真人 mp3 就播 mp3

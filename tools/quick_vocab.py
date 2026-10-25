@@ -19,7 +19,6 @@ import concurrent.futures
 import json
 import os
 import re
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -29,311 +28,72 @@ import urllib.request
 from datetime import date
 from pathlib import Path
 
-_zh_convert = None
-
-
-def to_traditional(s):
-    """簡轉繁（ECDICT 的中譯是簡體；沒有同等規模的原生繁體離線英漢字典）。
-    優先 OpenCC s2twp：台灣正體＋台灣用語（信息→資訊、軟件→軟體）；
-    沒裝就退回 zhconv。載入要數百 ms，延遲到第一次用到才 import（daemon 啟動時預載）。"""
-    global _zh_convert
-    if _zh_convert is None:
-        try:
-            from opencc import OpenCC
-            _zh_convert = OpenCC("s2twp").convert
-        except ImportError:
-            try:
-                from zhconv import convert
-                _zh_convert = lambda s: convert(s, "zh-tw")
-            except ImportError:
-                _zh_convert = False
-    return _zh_convert(s) if _zh_convert else s
-
-ECDICT_DB = Path(__file__).resolve().parent / "data" / "ecdict.db"
-
-VOCAB_LOG_DIR = Path.home() / "Library/CloudStorage/GoogleDrive-addislyu@gmail.com/我的雲端硬碟/VocabularyLog"
+DATA_DIR = Path(__file__).resolve().parent / "data"
+_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 
 POS_ZH = {
-    "n": "n. (名詞)",
-    "v": "v. (動詞)",
-    "adj": "adj. (形容詞)",
-    "adv": "adv. (副詞)",
-    "prep": "prep. (介系詞)",
-    "conj": "conj. (連接詞)",
-    "pron": "pron. (代名詞)",
+    "n": "n. (名詞)", "v": "v. (動詞)", "adj": "adj. (形容詞)", "adv": "adv. (副詞)",
+    "prep": "prep. (介系詞)", "conj": "conj. (連接詞)", "pron": "pron. (代名詞)",
     "int": "int. (感嘆詞)",
+    "noun": "n. (名詞)", "verb": "v. (動詞)", "adjective": "adj. (形容詞)",
+    "adverb": "adv. (副詞)", "preposition": "prep. (介系詞)", "conjunction": "conj. (連接詞)",
+    "pronoun": "pron. (代名詞)", "interjection": "int. (感嘆詞)", "abbreviation": "abbr. (縮寫)",
 }
 
 
 def http_json(url, timeout=8):
-    req = urllib.request.Request(url, headers={"User-Agent": "VocabCloud/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _google_translate(text):
-    """Google 翻譯的免金鑰端點（需帶瀏覽器 User-Agent，否則回 sorry 頁）。"""
+def google_lookup(text, timeout=5):
+    """Google 翻譯免金鑰端點，一次拿：翻譯(t)、詞性＋其他譯法(bd)、英文釋義(md)。
+    單字與整句都走這裡（長文品質比字典好）。回傳 dict，失敗會丟例外。"""
     q = urllib.parse.quote(text)
-    req = urllib.request.Request(
-        f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q={q}",
-        headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
-    )
-    with urllib.request.urlopen(req, timeout=5) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return "".join(seg[0] for seg in data[0] if seg and seg[0]).strip()
+    dts = "&dt=t" if " " in text.strip() else "&dt=t&dt=bd&dt=md"  # 整句沒有詞性/釋義，少傳
+    data = http_json(
+        "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW"
+        f"{dts}&q={q}", timeout=timeout)
+    out = {"translation": "", "pos": "", "definition": "", "alternatives": []}
+    zh = "".join(seg[0] for seg in (data[0] or []) if seg and seg[0]).strip()
+    if zh and zh.lower() != text.strip().lower():
+        out["translation"] = zh
+    pos_en = ""
+    bd = data[1] if len(data) > 1 else None
+    if bd:
+        pos_en = bd[0][0] or ""
+        out["pos"] = POS_ZH.get(pos_en, pos_en)
+        out["alternatives"] = [t for t in (bd[0][1] or [])[:5] if t and t != out["translation"]][:4]
+    md = data[12] if len(data) > 12 else None
+    if md:
+        entry = next((e for e in md if e and e[0] == pos_en), md[0])
+        if entry and entry[1]:
+            out["definition"] = entry[1][0][0]
+            if not out["pos"] and entry[0]:
+                out["pos"] = POS_ZH.get(entry[0], entry[0])
+    return out
 
 
 def translate_zh(text):
-    """英→繁中。Google 優先（片語/句子品質好），失敗或被擋改用 MyMemory；都沒有回空字串。"""
+    """英→繁中（Google 的 zh-TW 即台灣正體）。Google 失敗改用 MyMemory；都沒有回空字串。"""
     if not text:
         return ""
     try:
-        zh = _google_translate(text)
-        if zh and zh.strip().lower() != text.strip().lower():
-            return to_traditional(zh)
+        zh = google_lookup(text)["translation"]
+        if zh:
+            return zh
     except Exception:
         pass
     try:
         q = urllib.parse.quote(text)
-        data = http_json(
-            f"https://api.mymemory.translated.net/get?q={q}&langpair=en|zh-TW"
-        )
+        data = http_json(f"https://api.mymemory.translated.net/get?q={q}&langpair=en|zh-TW")
         zh = data.get("responseData", {}).get("translatedText", "") or ""
-        # MyMemory 偶爾回傳原文或錯誤訊息
         if zh.upper().startswith("MYMEMORY WARNING") or zh.strip().lower() == text.strip().lower():
             return ""
         return zh.strip()
     except Exception:
         return ""
-
-
-ECDICT_POS = {
-    "n": "n. (名詞)",
-    "v": "v. (動詞)",
-    "vt": "vt. (及物動詞)",
-    "vi": "vi. (不及物動詞)",
-    "a": "adj. (形容詞)",
-    "ad": "adv. (副詞)",
-    "adv": "adv. (副詞)",
-    "prep": "prep. (介系詞)",
-    "conj": "conj. (連接詞)",
-    "pron": "pron. (代名詞)",
-    "int": "int. (感嘆詞)",
-}
-
-
-_ecdict_con = None
-
-
-def _get_ecdict_con():
-    global _ecdict_con
-    if _ecdict_con is None:
-        _ecdict_con = sqlite3.connect(
-            f"file:{ECDICT_DB}?mode=ro", uri=True, check_same_thread=False
-        )
-    return _ecdict_con
-
-
-def local_lookup(word):
-    """本機 ECDICT 離線字典，毫秒級。查到回傳部分 info dict，查不到回傳 None。"""
-    if not ECDICT_DB.exists():
-        return None
-    try:
-        con = _get_ecdict_con()
-        cur = con.cursor()
-
-        def q(w):
-            return cur.execute(
-                "SELECT word, phonetic, translation, definition, exchange FROM stardict "
-                "WHERE word = ? COLLATE NOCASE", (w,)
-            ).fetchone()
-
-        row = q(word)
-        if row and row[4] and "0:" in row[4]:
-            # 變化形（courses、running）在 ECDICT 常只有冷僻義（courses → [醫]月經），
-            # 改用原形的翻譯與釋義，音標保留變化形自己的
-            lemma = dict(p.split(":", 1) for p in row[4].split("/") if ":" in p).get("0")
-            base = q(lemma) if lemma else None
-            if base and (base[2] or "").strip():
-                row = (row[0], row[1], base[2], base[3], row[4])
-        if not row:  # 試著還原常見字尾變化
-            lw = word.lower()
-            for suf, rep in (("ies", "y"), ("es", ""), ("s", ""), ("ing", ""),
-                             ("ing", "e"), ("ed", ""), ("ed", "e")):
-                if lw.endswith(suf) and len(lw) - len(suf) >= 3:
-                    row = q(lw[: len(lw) - len(suf)] + rep)
-                    if row:
-                        break
-    except Exception:
-        return None
-    if not row:
-        return None
-    return _row_to_info(row)
-
-
-def _phonetic_of(w):
-    try:
-        row = _get_ecdict_con().execute(
-            "SELECT phonetic FROM stardict WHERE word = ? COLLATE NOCASE", (w,)
-        ).fetchone()
-        return (row[0] or "").strip() if row else ""
-    except Exception:
-        return ""
-
-
-def _ed_sound(base):
-    if base.endswith(("t", "d")):
-        return "id"
-    return "t" if base[-1:] in "pkfsθʃ" else "d"
-
-
-def _s_sound(base):
-    if base[-1:] in "szʃʒ" or base.endswith("dʒ"):
-        return "iz"
-    return "s" if base[-1:] in "pktfθ" else "z"
-
-
-# 字尾 → 發音（不改變重音的字尾才放進來）
-_DERIV_SUFFIXES = (("ness", "nis"), ("less", "lis"), ("ment", "mәnt"), ("ful", "ful"),
-                   ("ly", "li"), ("ally", "әli"), ("er", "ә"), ("ing", "iŋ"),
-                   ("ed", None), ("es", None), ("s", None))
-
-
-def derive_phonetic(word):
-    """ECDICT 約 6% 常用字沒音標，幾乎都是衍生字/變化形（willingness、amplifying）。
-    用原形的音標加上字尾發音推導出來，純本機、毫秒級。推不出來回傳空字串。"""
-    w = word.lower()
-    if " " in w:  # 片語：每個字的音標接起來（set apart → set + apart）
-        parts = [_phonetic_of(p) or derive_phonetic(p) for p in w.split()]
-        return " ".join(parts) if all(parts) else ""
-
-    try:  # 1. ECDICT 的 exchange 欄位直接記錄原形與變化類型
-        row = _get_ecdict_con().execute(
-            "SELECT exchange FROM stardict WHERE word = ? COLLATE NOCASE", (w,)
-        ).fetchone()
-        ex = dict(p.split(":", 1) for p in (row[0] or "").split("/") if ":" in p) if row else {}
-        lemma, kind = ex.get("0"), ex.get("1", "")
-        if lemma and kind:
-            base = _phonetic_of(lemma)
-            if base:
-                k = kind[0]
-                suffix = {"i": "iŋ", "r": "ә", "t": "ist"}.get(k)
-                if k in "pd":
-                    suffix = _ed_sound(base)
-                elif k in "3s":
-                    suffix = _s_sound(base)
-                if suffix:
-                    return base + suffix
-    except Exception:
-        pass
-
-    for suf, sound in _DERIV_SUFFIXES:  # 2. 剝字尾找原形
-        if not w.endswith(suf) or len(w) - len(suf) < 3:
-            continue
-        stem = w[: -len(suf)]
-        candidates = [stem, stem + "e"]
-        if stem.endswith("i"):
-            candidates.append(stem[:-1] + "y")          # happi→happy
-        if len(stem) > 3 and stem[-1] == stem[-2]:
-            candidates.append(stem[:-1])                # admitt→admit
-        for c in candidates:
-            base = _phonetic_of(c)
-            if base:
-                if sound is None:
-                    sound = _ed_sound(base) if suf == "ed" else _s_sound(base)
-                return base + sound
-    return ""
-
-
-def _row_to_info(row):
-    """把 ECDICT 的一列轉成 info dict（共用於單字查詢與片語偵測）。"""
-    w, phonetic, translation, definition = row[:4]
-    info = {"word": w, "phonetic": "", "pos": "", "definition": "", "translation": ""}
-    phonetic = (phonetic or "").strip() or derive_phonetic(w)
-    if phonetic:
-        info["phonetic"] = f"[{phonetic}]"
-
-    trans_lines = [l.strip() for l in (translation or "").splitlines() if l.strip()]
-    # 帶領域標籤的義項（[醫]、[計]、[化]…）排到後面，一般義優先
-    trans_lines.sort(key=lambda l: bool(re.match(r"^([a-z]+\.\s*)?\[", l)))
-    if trans_lines:
-        m = re.match(r"([a-z]+)\.\s*(.*)", trans_lines[0])
-        if m:
-            info["pos"] = ECDICT_POS.get(m.group(1), m.group(1) + ".")
-        info["translation"] = to_traditional(
-            "；".join(re.sub(r"^[a-z]+\.\s*", "", l) for l in trans_lines[:2])
-        )
-
-    def_lines = [l.strip() for l in (definition or "").splitlines() if l.strip()]
-    if def_lines:
-        en_def = re.sub(r"^[a-z]+\.\s*", "", def_lines[0])
-        info["definition"] = f"{en_def} / {info['translation']}" if info["translation"] else en_def
-    return info
-
-
-_STOPWORDS = {"a", "an", "the", "is", "are", "was", "were", "be", "been", "it",
-              "its", "this", "that", "what", "who", "and", "or", "but", "so",
-              "of", "to", "in", "on", "at", "as", "by", "he", "she", "they", "we"}
-
-
-def _word_forms(w):
-    """還原常見字尾變化：sets→set、setting→set…（含原形）"""
-    forms = [w]
-    for suf, rep in (("ies", "y"), ("es", ""), ("s", ""), ("ing", ""),
-                     ("ing", "e"), ("ed", ""), ("ed", "e")):
-        if w.endswith(suf) and len(w) - len(suf) >= 2:
-            forms.append(w[: len(w) - len(suf)] + rep)
-    return forms
-
-
-def find_phrases(text, limit=3):
-    """在一段選取文字中自動偵測 ECDICT 收錄的片語。
-
-    掃描 2~4 字的連續組合，以及「動詞 … 介係詞」被 1~2 個字隔開的組合
-    （sets Xiang apart → set apart），第一個字做字尾還原。
-    回傳 info dict list，長的/連續的優先。
-    """
-    if not ECDICT_DB.exists():
-        return []
-    words = [w.lower() for w in re.findall(r"[A-Za-z']+", text)]
-    n = len(words)
-    candidates = []  # (score, phrase)
-
-    for i in range(n):
-        for length in (4, 3, 2):  # 連續 n-gram，長的分數高
-            if i + length <= n:
-                rest = words[i + 1: i + length]
-                for f in _word_forms(words[i]):
-                    candidates.append((length * 10, " ".join([f] + rest)))
-        for gap in (1, 2):  # 隔開的動詞片語：set ... apart
-            j = i + gap + 1
-            if j < n:
-                for f in _word_forms(words[i]):
-                    candidates.append((15, f"{f} {words[j]}"))
-
-    seen, results = set(), []
-    try:
-        cur = _get_ecdict_con().cursor()
-        for score, phrase in sorted(candidates, key=lambda c: -c[0]):
-            if phrase in seen or " " not in phrase:
-                continue
-            seen.add(phrase)
-            parts = phrase.split()
-            if all(p in _STOPWORDS for p in parts):
-                continue
-            row = cur.execute(
-                "SELECT word, phonetic, translation, definition FROM stardict "
-                "WHERE word = ? COLLATE NOCASE", (phrase,)
-            ).fetchone()
-            if row:
-                info = _row_to_info(row)
-                if info["translation"] or info["definition"]:
-                    results.append(info)
-                    if len(results) >= limit:
-                        break
-    except Exception:
-        pass
-    return results
 
 
 def is_phrase(text):
@@ -384,87 +144,37 @@ def fetch_dictapi(q):
 
 
 def lookup(word):
-    """回傳 dict: word, phonetic, pos, definition, example, translation, example_zh, audio_url
-
-    所有網路查詢都並行跑，整體時間 ≈ 最慢的一條，而不是全部加總。
-    """
-    info = {
-        "word": word,
-        "phonetic": "",
-        "pos": "",
-        "definition": "",
-        "example": "",
-        "translation": "",
-        "example_zh": "",
-        "audio_url": "",
-    }
-    # 片語/整句：翻譯整句，並自動偵測其中的字典片語（set apart 等）
-    if is_phrase(word):
-        sentence_zh = translate_zh(word)
-        matches = find_phrases(word)
-        if matches:
-            best = matches[0]
-            info.update(best)          # 片語當主條目
-            info["example"] = word     # 原選取整句變例句
-            info["example_zh"] = sentence_zh
-            if len(matches) > 1:
-                info["others"] = [m["word"] for m in matches[1:]]
-        else:
-            info["translation"] = sentence_zh
-        return info
-
+    """CLI/一次性模式用：Google（翻譯/詞性/釋義）＋ Datamuse（音標）＋ dictionaryapi（例句）並行。"""
+    info = {"word": word, "phonetic": "", "pos": "", "definition": "", "example": "",
+            "translation": "", "example_zh": "", "audio_url": "", "alternatives": []}
     q = urllib.parse.quote(word)
-
-    # 本機字典命中 → 只上網補例句（短 timeout，失敗就算了）
-    local = local_lookup(word)
-    if local is None and " " in word.strip():
-        # 兩個字的片語（Visa Hopping）：Datamuse 會把整串硬拼成垃圾音標，改逐字推導
-        ph = derive_phonetic(word)
-        info["phonetic"] = f"[{ph}]" if ph else ""
-        info["translation"] = translate_zh(word)
-        return info
-    if local:
-        info.update(local)
-        try:
-            da = fetch_dictapi(urllib.parse.quote(info["word"]))
-            if da["example"]:
-                info["example"] = da["example"]
-                info["example_zh"] = translate_zh(da["example"])
-            info["audio_url"] = da["audio_url"]
-        except Exception:
-            pass
-        return info
-
-    # 本機查不到（如片語）→ 原網路流程。第一波：三個來源同時查
+    single = " " not in word.strip()
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-        f_dm = ex.submit(fetch_datamuse, q)
-        f_da = ex.submit(fetch_dictapi, q)
-        f_tr = ex.submit(translate_zh, word)
-
+        f_g = ex.submit(google_lookup, word)
+        f_dm = ex.submit(fetch_datamuse, q) if single else None
+        f_da = ex.submit(fetch_dictapi, q) if single else None
         try:
-            info.update(f_dm.result())
+            info.update(f_g.result())
         except Exception:
-            pass  # 查不到字典仍可翻譯（例如片語）
-        try:
-            da = f_da.result()
-            if da["phonetic"]:
-                info["phonetic"] = da["phonetic"]
-            info["example"] = da["example"]
-            info["audio_url"] = da["audio_url"]
-        except Exception:
-            pass
-        info["translation"] = f_tr.result()
-
-    # 第二波：釋義與例句的中文翻譯同時查
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-        f_def = ex.submit(translate_zh, info["definition"]) if info["definition"] else None
-        f_ex = ex.submit(translate_zh, info["example"]) if info["example"] else None
-        if f_def:
-            zh_def = f_def.result()
-            if zh_def:
-                info["definition"] = f"{info['definition']} / {zh_def}"
-        if f_ex:
-            info["example_zh"] = f_ex.result()
+            info["translation"] = translate_zh(word)
+        if f_dm:
+            try:
+                dm = f_dm.result()
+                info["phonetic"] = dm["phonetic"]
+                if not info["definition"]:
+                    info["definition"], info["pos"] = dm["definition"], dm["pos"]
+            except Exception:
+                pass
+        if f_da:
+            try:
+                da = f_da.result()
+                if da["phonetic"]:
+                    info["phonetic"] = da["phonetic"]
+                info["example"], info["audio_url"] = da["example"], da["audio_url"]
+            except Exception:
+                pass
+    if info["example"]:
+        info["example_zh"] = translate_zh(info["example"])
     return info
 
 
@@ -550,7 +260,7 @@ def add_to_log(info):
         f"### {word}\n"
         f"* **KK音標：** {info['phonetic']}\n"
         f"* **詞性：** {info['pos']}\n"
-        f"* **釋義：** {info['definition']}\n"
+        f"* **釋義：** {info['definition']}{' / ' + info['translation'] if info['definition'] and info['translation'] else info['translation'] if not info['definition'] else ''}\n"
         f"* **例句：** {info['example']}\n"
         f"* **翻譯：** {info['example_zh'] or info['translation']}\n"
         f"\n---\n\n"
@@ -824,58 +534,57 @@ class VocabWindow:
         self._watch_focus()
 
         empty = {"word": word, "phonetic": "", "pos": "", "definition": "",
-                 "example": "", "translation": "", "example_zh": "", "audio_url": ""}
+                 "example": "", "translation": "", "example_zh": "", "audio_url": "",
+                 "alternatives": []}
+
+        cur = dict(empty)
+        lock = threading.Lock()
+
+        def merge(**fields):  # 各背景來源把結果合併進同一份 info，再整份送去顯示
+            with lock:
+                cur.update(fields)
+                snap = dict(cur)
+            self._post_fill(snap, gen)
 
         def worker():
-            if is_phrase(word):
-                # 片語偵測是純本機（毫秒級）：命中就先開窗顯示片語條目，
-                # 整句翻譯（網路，較慢）在背景補上 → 跟單字一樣快
-                matches = find_phrases(word)
-                if matches:
-                    info = {**empty, **matches[0], "example": word}
-                    if len(matches) > 1:
-                        info["others"] = [m["word"] for m in matches[1:]]
-                    self._post_fill(info, gen)
-                    info = {**info, "example_zh": translate_zh(word)}
-                    self._post_fill(info, gen)
-                else:  # 沒有字典片語 → 整句翻譯
-                    self._post_fill({**empty, "translation": translate_zh(word)}, gen)
-                return
+            # 主要來源：Google（翻譯/詞性/英文釋義/其他譯法），單字與整句都走這裡，~0.1s
+            try:
+                merge(**google_lookup(word))
+            except Exception as e:
+                _dbg(f"google lookup failed: {e}")
+                merge(translation=translate_zh(word))  # MyMemory 備援
+            if " " in word.strip():
+                return  # 片語/整句：只需翻譯
 
-            local = local_lookup(word)  # 毫秒級
-            if local:
-                info = {**empty, **local}
-                self._post_fill(info, gen)
-                if not info["phonetic"]:  # 本機推導不出來 → 背景向 Datamuse 要音標
-                    try:
-                        ph = fetch_datamuse(urllib.parse.quote(info["word"]))["phonetic"]
-                        if ph:
-                            info = {**info, "phonetic": ph}
-                            self._post_fill(info, gen)
-                    except Exception:
-                        pass
-                # Google 翻譯並行取得（~60-130ms），多顯示一行供對照；本機翻譯仍即時先出
-                def google_line():
-                    try:
-                        zh = _google_translate(word)
-                        if zh and zh.strip().lower() != word.strip().lower():
-                            self._post_fill({**info, "google_zh": to_traditional(zh)}, gen)
-                    except Exception:
-                        pass
+            q = urllib.parse.quote(word)
 
-                threading.Thread(target=google_line, daemon=True).start()
-                try:  # 背景補例句與真人發音
-                    da = fetch_dictapi(urllib.parse.quote(info["word"]))
-                    info = dict(info)
-                    if da["example"]:
-                        info["example"] = da["example"]
-                        info["example_zh"] = translate_zh(da["example"])
-                    info["audio_url"] = da["audio_url"]
-                    self._post_fill(info, gen)
+            def phon():  # 音標（Datamuse，穩定）
+                try:
+                    dm = fetch_datamuse(q)
+                    fields = {"phonetic": dm["phonetic"]} if dm["phonetic"] else {}
+                    with lock:
+                        if not cur["definition"] and dm["definition"]:
+                            fields.update(definition=dm["definition"], pos=dm["pos"])
+                    if fields:
+                        merge(**fields)
                 except Exception:
                     pass
-            else:  # 本機查不到 → 走網路
-                self._post_fill(lookup(word), gen)
+
+            def extra():  # 例句 + 真人發音（dictionaryapi.dev，常掛就算了）
+                try:
+                    da = fetch_dictapi(q)
+                    fields = {"audio_url": da["audio_url"]}
+                    if da["phonetic"]:
+                        fields["phonetic"] = da["phonetic"]
+                    if da["example"]:
+                        fields["example"] = da["example"]
+                        fields["example_zh"] = translate_zh(da["example"])
+                    merge(**fields)
+                except Exception:
+                    pass
+
+            threading.Thread(target=phon, daemon=True).start()
+            threading.Thread(target=extra, daemon=True).start()
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -903,16 +612,14 @@ class VocabWindow:
         if info.get("definition"):
             # 視窗只顯示英文釋義；中文翻譯上面綠字已有，不重複（存進字庫仍是完整版）
             parts.append(info["definition"].split(" / ")[0])
-        if info.get("others"):
-            parts.append("🧩 其他片語: " + "、".join(info["others"]))
         self.def_var.set(" ".join(parts))
         if info.get("example"):
             ex = info["example"]
             if info.get("example_zh"):
                 ex += f"\n{info['example_zh']}"
             self.ex_var.set(ex)
-        if info.get("google_zh"):
-            self.google_var.set(f"🌐 Google：{info['google_zh']}")
+        if info.get("alternatives"):
+            self.google_var.set("其他譯法：" + "、".join(info["alternatives"]))
         self.add_btn.config(state="normal")
         self._place()  # 內容變多視窗會長高，重新調整避免超出螢幕
         if self.pending_add:  # 資料還沒好時使用者就按了 ⌘ → 現在自動完成加入
@@ -1062,7 +769,7 @@ def _disable_app_nap(reason):
         return None
 
 
-ENABLED_FILE = ECDICT_DB.parent / "enabled"   # 內容 "0" = 停用；不存在 = 啟用
+ENABLED_FILE = DATA_DIR / "enabled"   # 內容 "0" = 停用；不存在 = 啟用
 
 
 def load_enabled():
@@ -1096,7 +803,7 @@ def _setup_status_item(state):
             on = state["enabled"]
             try:
                 # 自訂圖示（tools/make_icons.py 產生）：雲裡鏤空 A；停用為空心雲
-                icon = ECDICT_DB.parent.parent / "icons" / f"menubar_{'on' if on else 'off'}@2x.png"
+                icon = DATA_DIR.parent / "icons" / f"menubar_{'on' if on else 'off'}@2x.png"
                 img = NSImage.alloc().initWithContentsOfFile_(str(icon)) if icon.exists() else None
                 if img is None:  # 沒有圖檔就退回系統符號
                     img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
@@ -1265,7 +972,7 @@ def _start_audio_keepalive():
     像 podcast 播放器一樣一直握著音訊通道，發音才不會被裝置喚醒截掉開頭。
     迴圈以 kill -0 檢查 daemon 是否還活著，daemon 結束迴圈就自行退出。"""
     try:
-        wav = ECDICT_DB.parent / "silence.wav"
+        wav = DATA_DIR / "silence.wav"
         if not wav.exists():
             import struct
             import wave
@@ -1363,9 +1070,11 @@ def serve():
     _dbg(f"enabled={state['enabled']}")
 
     def preload():  # 把慢的初始化都在啟動時做掉：zhconv、語音偵測、字典連線
-        to_traditional("預載")
         get_english_voice()
-        local_lookup("preload")
+        try:
+            google_lookup("hello")  # 暖連線（DNS/TLS），第一次查字才不會多等 1 秒
+        except Exception:
+            pass
 
     threading.Thread(target=preload, daemon=True).start()
     _start_audio_keepalive()  # 常駐握住音訊通道：發音不再有裝置喚醒截頭/延遲
