@@ -71,10 +71,28 @@ def http_json(url, timeout=8):
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _google_translate(text):
+    """Google 翻譯的免金鑰端點（需帶瀏覽器 User-Agent，否則回 sorry 頁）。"""
+    q = urllib.parse.quote(text)
+    req = urllib.request.Request(
+        f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q={q}",
+        headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return "".join(seg[0] for seg in data[0] if seg and seg[0]).strip()
+
+
 def translate_zh(text):
-    """用 MyMemory 把英文翻成繁體中文，失敗回傳空字串。"""
+    """英→繁中。Google 優先（片語/句子品質好），失敗或被擋改用 MyMemory；都沒有回空字串。"""
     if not text:
         return ""
+    try:
+        zh = _google_translate(text)
+        if zh and zh.strip().lower() != text.strip().lower():
+            return to_traditional(zh)
+    except Exception:
+        pass
     try:
         q = urllib.parse.quote(text)
         data = http_json(
@@ -390,6 +408,12 @@ def lookup(word):
 
     # 本機字典命中 → 只上網補例句（短 timeout，失敗就算了）
     local = local_lookup(word)
+    if local is None and " " in word.strip():
+        # 兩個字的片語（Visa Hopping）：Datamuse 會把整串硬拼成垃圾音標，改逐字推導
+        ph = derive_phonetic(word)
+        info["phonetic"] = f"[{ph}]" if ph else ""
+        info["translation"] = translate_zh(word)
+        return info
     if local:
         info.update(local)
         try:
@@ -577,10 +601,12 @@ class VocabWindow:
         btns = tk.Frame(root)
         btns.pack(side="bottom", anchor="e", pady=(12, 0))
         self.play_btn = tk.Button(btns, text="🔊 發音 (空白鍵)", command=self.on_play)
+        web_btn = tk.Button(btns, text="🌐 Google 翻譯 (G)", command=self.on_google)
         close_btn = tk.Button(btns, text="關閉 (Esc)", command=self.dismiss)
         self.add_btn = tk.Button(btns, text="➕ 加入單字庫 (fn)", command=self.on_add,
                                  state="disabled", default="active")
         self.play_btn.pack(side="left", padx=4)
+        web_btn.pack(side="left", padx=4)
         close_btn.pack(side="left", padx=4)
         self.add_btn.pack(side="left", padx=4)
         self.status_label = tk.Label(root, textvariable=self.status_var,
@@ -605,6 +631,8 @@ class VocabWindow:
         root.bind("a", lambda e: self.on_add())      # 左手無名指原位
         root.bind("A", lambda e: self.on_add())
         root.bind("<space>", lambda e: self.on_play())
+        root.bind("g", lambda e: self.on_google())
+        root.bind("G", lambda e: self.on_google())
         root.bind("<FocusOut>", self._on_focus_out)  # 點視窗外面 → 自動關閉
         root.protocol("WM_DELETE_WINDOW", self.dismiss)
 
@@ -930,6 +958,13 @@ class VocabWindow:
             pass
 
     # ---------- 按鈕 ----------
+    def on_google(self):
+        """翻譯怪怪的時候：用瀏覽器開 Google 翻譯帶入目前的字。"""
+        url = ("https://translate.google.com/?sl=en&tl=zh-TW&op=translate&text="
+               + urllib.parse.quote(self.word))
+        subprocess.Popen(["open", url])
+        self.dismiss()
+
     def on_play(self):
         self._speak(self.word, self.info.get("audio_url", "") if self.info else "")
 
