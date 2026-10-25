@@ -7,6 +7,14 @@
 
 ## 架構：常駐 daemon（速度關鍵）
 
+### 選單列開關
+daemon 在選單列有一個圖示（雲裡鏤空 A）：
+- **停用查單字 / 啟用查單字**：停用時四指點與快捷鍵都不反應；狀態存在 `tools/data/enabled`，重開機後維持
+- 開啟今天的單字檔、查看紀錄（/tmp/vocabcloud-daemon.log）
+- 重新啟動（launchd 會立刻拉起）
+- 結束（卸載到下次登入；重開機/重新登入會自動回來）
+圖示由 `tools/make_icons.py` 產生（template 圖，隨深淺色主題自動反轉）。
+
 `quick_vocab.py --serve` 是常駐背景程式：視窗預先建好藏著、字典連線備妥，
 觸發時只是透過 unix socket 喚醒，**0.1 秒內出現**，且視窗能浮在全螢幕 App 之上。
 daemon 沒在跑時自動退回一次性模式（較慢但可用）。

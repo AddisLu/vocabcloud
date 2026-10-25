@@ -974,6 +974,104 @@ def _disable_app_nap(reason):
         return None
 
 
+ENABLED_FILE = ECDICT_DB.parent / "enabled"   # 內容 "0" = 停用；不存在 = 啟用
+
+
+def load_enabled():
+    try:
+        return ENABLED_FILE.read_text().strip() != "0"
+    except OSError:
+        return True
+
+
+def save_enabled(flag):
+    try:
+        ENABLED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ENABLED_FILE.write_text("1" if flag else "0")
+    except OSError:
+        pass
+
+
+def _setup_status_item(state):
+    """選單列圖示：啟用/停用切換、開單字檔、看紀錄、重啟、結束。
+    回呼在 AppKit 事件中執行，裡面絕不碰 tkinter（會讓直譯器崩潰）；
+    只改 state 與 AppKit 物件，由 Tk 的輪詢讀 state。"""
+    try:
+        from AppKit import (NSImage, NSMenu, NSMenuItem, NSObject, NSStatusBar,
+                            NSVariableStatusItemLength)
+    except Exception as e:
+        _dbg(f"status item unavailable: {e}")
+        return None
+
+    class Controller(NSObject):
+        def refresh(self):
+            on = state["enabled"]
+            try:
+                # 自訂圖示（tools/make_icons.py 產生）：雲裡鏤空 A；停用為空心雲
+                icon = ECDICT_DB.parent.parent / "icons" / f"menubar_{'on' if on else 'off'}@2x.png"
+                img = NSImage.alloc().initWithContentsOfFile_(str(icon)) if icon.exists() else None
+                if img is None:  # 沒有圖檔就退回系統符號
+                    img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                        "character.book.closed.fill" if on else "book.closed", "VocabCloud")
+                else:
+                    img.setSize_((18, 18))
+                img.setTemplate_(True)  # 單色模板：隨深淺色選單列自動反轉
+                self.item.button().setImage_(img)
+                self.item.button().setAppearsDisabled_(not on)
+            except Exception:
+                self.item.button().setTitle_("📖" if on else "📕")
+            self.toggle_item.setTitle_("停用查單字" if on else "啟用查單字")
+            self.toggle_item.setState_(1 if on else 0)
+
+        def toggle_(self, sender):
+            state["enabled"] = not state["enabled"]
+            save_enabled(state["enabled"])
+            _dbg(f"enabled={state['enabled']}")
+            self.refresh()
+            notify("VocabCloud", "查單字已啟用" if state["enabled"] else "查單字已停用（選單列可重新啟用）")
+
+        def openVocab_(self, sender):
+            today = VOCAB_LOG_DIR / f"vocab_{date.today().isoformat()}.md"
+            subprocess.Popen(["open", str(today if today.exists() else VOCAB_LOG_DIR)])
+
+        def openLog_(self, sender):
+            subprocess.Popen(["open", "-a", "Console", "/tmp/vocabcloud-daemon.log"])
+
+        def restart_(self, sender):
+            _dbg("restart requested from menu")
+            os._exit(0)  # launchd KeepAlive 會立刻重新拉起
+
+        def quit_(self, sender):
+            _dbg("quit requested from menu")
+            subprocess.Popen(["launchctl", "bootout",
+                              f"gui/{os.getuid()}/com.vocabcloud.quickvocab"])
+
+    ctl = Controller.alloc().init()
+    ctl.item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
+    menu = NSMenu.alloc().init()
+
+    def add(title, action, key=""):
+        it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
+        if action:
+            it.setTarget_(ctl)
+        menu.addItem_(it)
+        return it
+
+    hdr = add("VocabCloud 查單字", None)
+    hdr.setEnabled_(False)
+    menu.addItem_(NSMenuItem.separatorItem())
+    ctl.toggle_item = add("停用查單字", "toggle:")
+    menu.addItem_(NSMenuItem.separatorItem())
+    add("開啟今天的單字檔", "openVocab:")
+    add("查看紀錄", "openLog:")
+    menu.addItem_(NSMenuItem.separatorItem())
+    add("重新啟動", "restart:")
+    add("結束（下次登入會自動回來）", "quit:")
+    ctl.item.setMenu_(menu)
+    ctl.refresh()
+    return ctl
+
+
 class SpeechClient:
     """把要唸的字寫進語音子程序的 stdin（微秒級）；子程序掛了就重開。"""
 
@@ -1171,6 +1269,9 @@ def serve():
     win = VocabWindow(oneshot=False)
     win.root.withdraw()
     win._activity = _disable_app_nap("VocabCloud daemon")  # 視窗收起時也不被節流
+    state = {"enabled": load_enabled()}
+    win._status = _setup_status_item(state)  # 保住參照
+    _dbg(f"enabled={state['enabled']}")
 
     def preload():  # 把慢的初始化都在啟動時做掉：zhconv、語音偵測、字典連線
         to_traditional("預載")
@@ -1285,7 +1386,7 @@ def serve():
         if hotkey_hits:
             _dbg(f"hotkey x{len(hotkey_hits)}")
             hotkey_hits.clear()
-            if dedupe():
+            if state["enabled"] and dedupe():
                 show_from_clipboard()
         win.root.after(10, check_hotkey)
 
@@ -1380,7 +1481,8 @@ def serve():
     def check_tap():
         if tap_hits:
             tap_hits.clear()
-            on_native_tap()
+            if state["enabled"]:
+                on_native_tap()
         win.root.after(10, check_tap)
 
     try:
