@@ -611,7 +611,6 @@ class VocabWindow:
         self._setup_macos()
         self._setup_speech()
         self._setup_fn_key()
-        self._warm_speech()
 
     def _setup_fn_key(self):
         """單按 fn 加入單字庫。Tk 收不到單獨的 fn，改用 NSEvent 本機監聽
@@ -678,46 +677,21 @@ class VocabWindow:
             pass
 
     def _setup_speech(self):
-        """常駐的行程內語音合成器：發音不再每次冷啟動 say（省 ~100ms 且不截頭）。"""
-        self.synth = None
-        try:
-            from AppKit import NSSpeechSynthesizer
-            voice = None
-            for v in NSSpeechSynthesizer.availableVoices():
-                s = str(v)
-                if "en-US" in s or ".en_US." in s:
-                    voice = v
-                    if "Samantha" in s:
-                        break
-            if voice:
-                self.synth = NSSpeechSynthesizer.alloc().initWithVoice_(voice)
-        except Exception:
-            self.synth = None
-
-    def _warm_speech(self):
-        """語音保溫。實測：第一次唸要 ~800ms（載入語音），之後 ~60ms；
-        閒置 50 秒會回升到 ~200ms。所以啟動時先用音量 0 唸一個真字把語音載進來，
-        之後每 30 秒再靜音唸一次維持熱度（正在唸真字時跳過這輪）。"""
-        try:
-            if self.synth is not None and not self.synth.isSpeaking():
-                self.synth.setVolume_(0.0)
-                self.synth.startSpeakingString_("warm up")
-        except Exception:
-            pass
-        self.root.after(30_000, self._warm_speech)
+        """語音在獨立子程序（純 NSRunLoop）跑：daemon 的 Tk 主迴圈服務 run loop 太慢，
+        同一個合成器在 Tk 裡出聲要 135~370ms，在純 run loop 裡只要 ~60ms。"""
+        self.speech = SpeechClient()
+        self.speech.ensure()  # 立刻啟動並預熱
 
     def _speak(self, text, audio_url=""):
         if audio_url:  # 有真人 mp3 → 交給子程序下載播放
             play_pronunciation(text, audio_url)
             return
-        if self.synth is not None:
-            try:
-                self.synth.stopSpeaking()   # 可能正在靜音保溫
-                self.synth.setVolume_(1.0)
-                self.synth.startSpeakingString_(text)
-                return
-            except Exception:
-                pass
+        try:
+            self.speech.speak(text)
+            _dbg(f"speak sent: {text[:20]!r}")
+            return
+        except Exception as e:
+            _dbg(f"speech server failed: {e}")
         play_pronunciation(text)  # 備援：say
 
     def _order_front(self, activate=True):
@@ -772,13 +746,13 @@ class VocabWindow:
             self.pointer = self.root.winfo_pointerxy()
         except Exception:
             self.pointer = (200, 200)
+        self._speak(word)  # 先發音再開窗：發音在子程序跑，和開窗同時進行
+
         self._place()
         self.root.deiconify()
         self._order_front()
         self._reset_hide_timer()
         self._watch_focus()
-
-        self._speak(word)  # 立刻發音（常駐合成器，零冷啟動）
 
         empty = {"word": word, "phonetic": "", "pos": "", "definition": "",
                  "example": "", "translation": "", "example_zh": "", "audio_url": ""}
@@ -985,6 +959,105 @@ class VocabWindow:
         threading.Thread(target=work, daemon=True).start()
 
 
+def _disable_app_nap(reason):
+    """宣告延遲敏感活動，禁止 App Nap。沒有視窗的背景程序（語音子程序、
+    視窗收起時的 daemon）會被節流，run loop 喚醒變慢，發音延遲暴增到 300ms。
+    回傳的 activity 物件必須保住，釋放即解除。"""
+    try:
+        from Foundation import NSProcessInfo
+        USER_INITIATED_ALLOWING_IDLE_SLEEP = 0x00FFFFFF & ~(1 << 20)
+        LATENCY_CRITICAL = 0xFF00000000
+        return NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+            USER_INITIATED_ALLOWING_IDLE_SLEEP | LATENCY_CRITICAL, reason)
+    except Exception as e:
+        _dbg(f"app nap disable failed: {e}")
+        return None
+
+
+class SpeechClient:
+    """把要唸的字寫進語音子程序的 stdin（微秒級）；子程序掛了就重開。"""
+
+    def __init__(self):
+        self.proc = None
+
+    def ensure(self):
+        if self.proc is None or self.proc.poll() is not None:
+            self.proc = subprocess.Popen(
+                [sys.executable, os.path.abspath(__file__), "--speech-server"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=sys.stderr,
+            )
+
+    def speak(self, text):
+        self.ensure()
+        self.proc.stdin.write((text.replace("\n", " ").strip() + "\n").encode("utf-8"))
+        self.proc.stdin.flush()
+
+
+def speech_server():
+    """常駐語音子程序：stdin 每行一個要唸的字（"STOP" 停止）。
+    純 NSRunLoop，不受 Tk 拖累；啟動時音量 0 唸真字預載語音，每 30 秒保溫。"""
+    import queue
+    import threading
+    from AppKit import NSDate, NSObject, NSRunLoop, NSSpeechSynthesizer
+
+    class Timer(NSObject):
+        t0 = 0.0
+        first = None
+
+        def speechSynthesizer_willSpeakWord_ofString_(self, synth, rng, text):
+            if self.first is None and self.t0:
+                self.first = time.time() - self.t0
+                _dbg(f"speech started after {self.first * 1000:.0f}ms")
+
+    voice = None
+    for v in NSSpeechSynthesizer.availableVoices():
+        sv = str(v)
+        if "en-US" in sv or ".en_US." in sv:
+            voice = v
+            if "Samantha" in sv:
+                break
+    synth = NSSpeechSynthesizer.alloc().initWithVoice_(voice)
+    timer = Timer.alloc().init()
+    synth.setDelegate_(timer)
+    _activity = _disable_app_nap("VocabCloud speech")  # noqa: F841 保住參照
+
+    q = queue.Queue()
+
+    def reader():
+        for line in sys.stdin:
+            q.put(line.rstrip("\n"))
+        q.put(None)  # 父程序關了
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    def warm():
+        if not synth.isSpeaking():
+            synth.setVolume_(0.0)
+            synth.startSpeakingString_("warm up")
+
+    warm()
+    last_warm = time.time()
+    loop = NSRunLoop.currentRunLoop()
+    while True:
+        loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.005))
+        try:
+            item = q.get_nowait()
+        except queue.Empty:
+            item = ""
+        if item is None:
+            return
+        if item == "STOP":
+            synth.stopSpeaking()
+        elif item:
+            synth.stopSpeaking()
+            synth.setVolume_(1.0)
+            timer.t0, timer.first = time.time(), None
+            synth.startSpeakingString_(item)
+        if time.time() - last_warm > 30:
+            warm()
+            last_warm = time.time()
+
+
 def send_to_daemon(word):
     """把單字丟給常駐 daemon（毫秒級）。daemon 沒在跑回傳 False。"""
     import socket
@@ -1097,6 +1170,7 @@ def serve():
 
     win = VocabWindow(oneshot=False)
     win.root.withdraw()
+    win._activity = _disable_app_nap("VocabCloud daemon")  # 視窗收起時也不被節流
 
     def preload():  # 把慢的初始化都在啟動時做掉：zhconv、語音偵測、字典連線
         to_traditional("預載")
@@ -1350,6 +1424,9 @@ def main():
     args = [a for a in sys.argv[1:] if a.strip()]
     if args and args[0] == "--serve":
         serve()
+        return
+    if args and args[0] == "--speech-server":
+        speech_server()
         return
     mode = "dialog"
     if args and args[0] in ("--add", "--lookup"):
