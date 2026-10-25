@@ -1026,6 +1026,7 @@ def _setup_status_item(state):
         def toggle_(self, sender):
             state["enabled"] = not state["enabled"]
             save_enabled(state["enabled"])
+            state["restart_detector"] = True  # 由 Tk 輪詢執行（這裡不能碰 tkinter）
             _dbg(f"enabled={state['enabled']}")
             self.refresh()
             notify("VocabCloud", "查單字已啟用" if state["enabled"] else "查單字已停用（選單列可重新啟用）")
@@ -1363,6 +1364,8 @@ def serve():
                     win.root.after(0, win.dismiss)
                 elif data == "TAP":      # 等同四指輕點（測試用）
                     tap_hits.append(1)
+                elif data == "WAKE":     # 模擬喚醒通知（測試用）
+                    wake_hits.append("socket WAKE")
                 elif data:
                     win.root.after(0, win.show, data)
             except Exception:
@@ -1479,11 +1482,54 @@ def serve():
             wait_clip(base, now)
 
     def check_tap():
+        if state.pop("restart_detector", False):
+            restart_detector("toggle")
         if tap_hits:
             tap_hits.clear()
             if state["enabled"]:
                 on_native_tap()
         win.root.after(10, check_tap)
+
+    wake_hits = []
+
+    def restart_detector(reason):
+        """睡眠/螢幕喚醒後 MultitouchSupport 的回呼會失效，整個重新註冊。"""
+        det = getattr(win, "_tap_detector", None)
+        if det is None:
+            return
+        try:
+            det.stop()
+            n = det.start()
+            _dbg(f"tap detector restarted ({reason}): devices={n}")
+        except Exception as e:
+            _dbg(f"tap detector restart failed ({reason}): {e}")
+
+    def check_wake():
+        if wake_hits:
+            reason = wake_hits[-1]
+            wake_hits.clear()
+            win.root.after(1500, lambda: restart_detector(reason))  # 等裝置重新列舉好
+        win.root.after(500, check_wake)
+
+    def _watch_wake():
+        """NSWorkspace 喚醒通知。回呼只舉旗（不碰 tkinter），由 Tk 輪詢處理。"""
+        try:
+            from AppKit import NSObject, NSWorkspace
+            from Foundation import NSNotificationCenter  # noqa: F401
+
+            class WakeObserver(NSObject):
+                def wake_(self, note):
+                    wake_hits.append(str(note.name()))
+
+            obs = WakeObserver.alloc().init()
+            nc = NSWorkspace.sharedWorkspace().notificationCenter()
+            for name in ("NSWorkspaceDidWakeNotification", "NSWorkspaceScreensDidWakeNotification",
+                         "NSWorkspaceSessionDidBecomeActiveNotification"):
+                nc.addObserver_selector_name_object_(obs, "wake:", name, None)
+            win._wake_observer = obs
+            check_wake()
+        except Exception as e:
+            _dbg(f"wake watcher failed: {e}")
 
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1493,7 +1539,9 @@ def serve():
         _dbg(f"native tap detector: devices={n_dev}")
         if n_dev:
             win._tap_detector = det  # 保住參照
+            win._restart_detector = restart_detector
             check_tap()
+            _watch_wake()
             try:  # 沒有輔助使用權限就跳系統提示（系統只會問一次，之後要手動到設定頁開）
                 from ApplicationServices import (AXIsProcessTrustedWithOptions,
                                                  kAXTrustedCheckOptionPrompt)

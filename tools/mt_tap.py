@@ -103,13 +103,31 @@ class TapDetector:
             pass
         return 0
 
+    def stop(self):
+        """解除回呼並停止裝置。睡眠後裝置會被系統重置，必須 stop() 再 start()。"""
+        mt = getattr(self, "_mt", None)
+        if mt is None:
+            return
+        for d in self._devices:
+            try:
+                mt.MTUnregisterContactFrameCallback(d, self._cb)
+                mt.MTDeviceStop(d)
+            except Exception:
+                pass
+        self._devices = []
+        self._devlist = None
+        with self._lock:
+            self._reset()
+
     def start(self):
-        """回傳啟動了幾個觸控裝置；0 表示框架不可用。"""
+        """回傳啟動了幾個觸控裝置；0 表示框架不可用。可在 stop() 後重複呼叫。"""
         mt = ctypes.CDLL(_MT_PATH)
         cf = ctypes.CDLL(_CF_PATH)
         mt.MTDeviceCreateList.restype = ctypes.c_void_p
         mt.MTRegisterContactFrameCallback.argtypes = [ctypes.c_void_p, _CALLBACK]
+        mt.MTUnregisterContactFrameCallback.argtypes = [ctypes.c_void_p, _CALLBACK]
         mt.MTDeviceStart.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        mt.MTDeviceStop.argtypes = [ctypes.c_void_p]
         cf.CFArrayGetCount.argtypes = [ctypes.c_void_p]
         cf.CFArrayGetCount.restype = ctypes.c_long
         cf.CFArrayGetValueAtIndex.argtypes = [ctypes.c_void_p, ctypes.c_long]
