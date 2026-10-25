@@ -1129,8 +1129,11 @@ def serve():
              f"last_change={now - clip_state['changed_at']:.2f}s ago")
         # ⌘C 已在訊號之前開始（0.6 秒內剛變過）→ 不必再等計數變化，只等內容到齊
         already = cur != clip_state["count"] or now - clip_state["changed_at"] < 0.6
-        base = None if already else cur
-        deadline = now + 1.0  # BTT 偶爾較慢，留寬一點
+        wait_clip(None if already else cur, now, already)
+
+    def wait_clip(base, now, already=False):
+        """等剪貼簿變成 base 以外的值且讀得到文字（最多 1 秒），然後開窗。"""
+        deadline = now + 1.0
 
         def poll():
             # 很多 App 複製是「先清空、再寫入」：計數一跳就讀可能讀到空的，
@@ -1178,18 +1181,82 @@ def serve():
     # 快捷鍵回呼發生在 Tk 主迴圈處理事件途中，回呼裡碰 tkinter 會讓直譯器崩潰，
     # 所以回呼只舉旗，由 Tk 自己每 10ms 檢查旗子。
     hotkey_hits = []
+    last_trigger = {"t": 0.0}
+
+    def dedupe():
+        """原生四指與 BTT 兩條路徑並存時，1 秒內只處理一次。"""
+        now = _time.time()
+        if now - last_trigger["t"] < 1.0:
+            return False
+        last_trigger["t"] = now
+        return True
 
     def check_hotkey():
         if hotkey_hits:
             _dbg(f"hotkey x{len(hotkey_hits)}")
             hotkey_hits.clear()
-            show_from_clipboard()
+            if dedupe():
+                show_from_clipboard()
         win.root.after(10, check_hotkey)
 
     if _register_hotkey(lambda: hotkey_hits.append(1)):
         check_hotkey()
     else:
         print("hotkey registration failed", file=sys.stderr, flush=True)
+
+    # ---- 主要觸發：daemon 自己偵測四指輕點（MultitouchSupport），不經 BTT ----
+    # 觸發後自己送 ⌘C（CGEvent，需給 Python 輔助使用權限），再等剪貼簿開窗。
+    tap_hits = []
+
+    def send_cmd_c():
+        from Quartz import (CGEventCreateKeyboardEvent, CGEventPost, CGEventSetFlags,
+                            kCGEventFlagMaskCommand, kCGHIDEventTap)
+        for down in (True, False):
+            e = CGEventCreateKeyboardEvent(None, 8, down)  # kVK_ANSI_C
+            CGEventSetFlags(e, kCGEventFlagMaskCommand)
+            CGEventPost(kCGHIDEventTap, e)
+
+    def on_native_tap():
+        if not dedupe():
+            return
+        now = _time.time()
+        _dbg("4-finger tap (native)")
+        base = pasteboard.changeCount() if pasteboard is not None else None
+        try:
+            send_cmd_c()
+        except Exception as e:
+            _dbg(f"send ⌘C failed: {e}")
+            notify("VocabCloud", "無法送出 ⌘C：請到 系統設定 → 隱私權與安全性 → 輔助使用 允許 Python")
+            return
+        if pasteboard is None:
+            win.root.after(200, lambda: win.show(_read_clip()))
+        else:
+            wait_clip(base, now)
+
+    def check_tap():
+        if tap_hits:
+            tap_hits.clear()
+            on_native_tap()
+        win.root.after(10, check_tap)
+
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from mt_tap import TapDetector
+        det = TapDetector(on_tap=lambda: tap_hits.append(1))
+        n_dev = det.start()
+        _dbg(f"native tap detector: devices={n_dev}")
+        if n_dev:
+            win._tap_detector = det  # 保住參照
+            check_tap()
+            try:  # 沒有輔助使用權限就跳系統提示（只會問一次）
+                from ApplicationServices import (AXIsProcessTrustedWithOptions,
+                                                 kAXTrustedCheckOptionPrompt)
+                _dbg(f"accessibility trusted="
+                     f"{AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})}")
+            except Exception as e:
+                _dbg(f"accessibility check failed: {e}")
+    except Exception as e:
+        _dbg(f"native tap detector failed: {e}")
 
     if Path(SOCKET_PATH).exists():
         Path(SOCKET_PATH).unlink()

@@ -53,7 +53,14 @@ macOS 服務機制本身每次要 ~1 秒啟動，BTT 直接執行可以壓到 ~0
 - 「Execute Terminal Command (async)」：
   `/opt/homebrew/bin/python3 /Users/yourulyu/coding/vocabcloud/tools/quick_vocab.py "$(pbpaste)"`
 
-觸發方式：**四指輕點**（4 Finger Tap，設定在 BTT）。
+觸發方式：**四指輕點**，由 daemon 自己偵測（`tools/mt_tap.py`，讀 macOS 私有框架
+MultitouchSupport 的原始觸控資料，即 BTT 的底層方法，不需權限）。偵測到後 daemon 自己送 ⌘C
+（CGEvent），這一步需要給 **Python 輔助使用權限**（首次啟動會跳系統提示；若錯過：
+系統設定 → 隱私權與安全性 → 輔助使用 → 加入 Python）。不再依賴 BTT。
+
+診斷：`python3 tools/mt_tap.py` 後在觸控板四指輕點，會印出偵測結果。
+
+（以下為舊的 BTT 路徑，保留作備援；daemon 對兩條路徑做 1 秒內去重）
 **BTT 必須設定開機自動啟動**（BTT → Settings → General → Launch on startup），
 否則重開機後 daemon 雖在跑、但手勢沒人辨識，四指點不會有反應。
 BTT 動作：送 ⌘C → 送 ⌃⌥⇧⌘F19。daemon 用 Carbon 註冊 ⌃⌥⇧⌘F19 為全域快捷鍵（不需權限），
