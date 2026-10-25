@@ -4,6 +4,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import json
 import pandas as pd
+import random
 import time
 import re
 from gtts import gTTS
@@ -51,7 +52,22 @@ if 'practice_mode' not in st.session_state:
 def go_to_menu():
     st.session_state.page = 'menu'
     st.session_state.practice_cards = []
-    
+
+def start_practice(cards_df, mode='flashcard', shuffle=True, limit=0):
+    """以 DataFrame 開始一輪練習；預設洗牌，避免每次都同樣的順序。"""
+    cards = cards_df.to_dict('records')
+    if shuffle:
+        random.shuffle(cards)
+    if limit:
+        cards = cards[:limit]
+    st.session_state.practice_cards = cards
+    st.session_state.current_index = 0
+    st.session_state.is_front = True
+    st.session_state.practice_mode = mode
+    st.session_state.page = 'practice'
+    st.rerun()
+
+
 def play_audio(text):
     if not text: return
     try:
@@ -66,6 +82,19 @@ def play_audio(text):
 # ==========================================
 # 4. 🚀 核心升級：防彈版資料庫整理與 SRS 演算法
 # ==========================================
+# 精熟門檻：參考 ai-review 題庫的 SRS（連續答對升到第 3 盒即視為精熟，
+# 精熟的錯題不再進錯題特訓；答錯會重置 Level，字就會回到錯題本）。
+MASTER_LEVEL = 3
+STATUS = [(90, "精熟 💪"), (75, "熟練 ✨"), (50, "練習中 📖"), (0, "待加強 🔥")]
+
+def status_of(score):
+    if score is None or pd.isna(score):
+        return "尚未練習"
+    for th, label in STATUS:
+        if score >= th:
+            return label
+    return "待加強 🔥"
+
 def fetch_and_clean_data():
     """讀取資料庫，並加上『防彈機制』避免空白或格式錯誤"""
     sheet = get_sheet()
@@ -81,16 +110,25 @@ def fetch_and_clean_data():
     today_str = date.today().isoformat()
     
     # 2. 確保所有必備欄位都在，沒有就補上空字串
-    for col in ['Tag', 'Level', 'Next_Review', 'Created_At']:
+    for col in ['Tag', 'Level', 'Next_Review', 'Created_At', 'Correct', 'Wrong']:
         if col not in df.columns:
             df[col] = ''
-            
+
     # 3. 防彈轉型 (自動把奇怪的字元轉成預設值，不怕讀到錯位的資料)
     df['Tag'] = df['Tag'].fillna('未分類').astype(str).replace(r'^\s*$', '未分類', regex=True)
     df['Level'] = pd.to_numeric(df['Level'], errors='coerce').fillna(0).astype(int)
+    df['Correct'] = pd.to_numeric(df['Correct'], errors='coerce').fillna(0).astype(int)
+    df['Wrong'] = pd.to_numeric(df['Wrong'], errors='coerce').fillna(0).astype(int)
     df['Next_Review'] = df['Next_Review'].fillna(today_str).astype(str).replace(r'^\s*$', today_str, regex=True)
     df['Created_At'] = df['Created_At'].fillna(today_str).astype(str).replace(r'^\s*$', today_str, regex=True)
-    
+
+    # 4. 衍生欄位 (參考 ai-review 題庫：精熟 = Level 達標；錯題 = 錯過且尚未精熟)
+    df['Created_Date'] = df['Created_At'].str[:10]
+    df['Attempts'] = df['Correct'] + df['Wrong']
+    df['Accuracy'] = (df['Correct'] * 100 / df['Attempts'].where(df['Attempts'] > 0)).round()
+    df['Mastered'] = df['Level'] >= MASTER_LEVEL
+    df['Open_Wrong'] = (df['Wrong'] > 0) & ~df['Mastered']
+
     return df
 
 def safe_int(val):
@@ -221,20 +259,15 @@ def render_menu():
         # 1. 📅 SRS 今日複習
         today_str = date.today().isoformat()
         srs_df = df[df['Next_Review'] <= today_str]
-        
+
         col_srs, col_new = st.columns(2)
         with col_srs:
             if st.button(f"📅 今日應複習 ({len(srs_df)} 字)", type="primary", use_container_width=True):
                 if srs_df.empty:
                     st.success("太神啦！今天沒有需要複習的單字！")
                 else:
-                    st.session_state.practice_cards = srs_df.to_dict('records')
-                    st.session_state.current_index = 0
-                    st.session_state.is_front = True
-                    st.session_state.practice_mode = 'flashcard'
-                    st.session_state.page = 'practice'
-                    st.rerun()
-                    
+                    start_practice(srs_df)
+
         # 2. ⏰ 最近一週衝刺
         seven_days_ago = (date.today() - timedelta(days=7)).isoformat()
         new_df = df[df['Created_At'] >= seven_days_ago]
@@ -243,40 +276,50 @@ def render_menu():
                 if new_df.empty:
                     st.warning("最近 7 天沒有新增單字喔。")
                 else:
-                    st.session_state.practice_cards = new_df.to_dict('records')
-                    st.session_state.current_index = 0
-                    st.session_state.is_front = True
-                    st.session_state.practice_mode = 'flashcard'
-                    st.session_state.page = 'practice'
-                    st.rerun()
+                    start_practice(new_df)
 
-        # 3. 🏷️ 專項主題與克漏字
+        # 3. ❌ 錯題特訓 (參考 ai-review：錯最多次的優先出題，已精熟的不再出現)
+        wrong_df = df[df['Open_Wrong']].sort_values('Wrong', ascending=False)
+        wrong2_df = wrong_df[wrong_df['Wrong'] >= 2]
+        col_w1, col_w2 = st.columns(2)
+        with col_w1:
+            if st.button(f"❌ 錯題總複習 ({len(wrong_df)} 字)", use_container_width=True):
+                if wrong_df.empty:
+                    st.success("沒有待複習的錯題，太強了！")
+                else:
+                    start_practice(wrong_df, shuffle=False)
+        with col_w2:
+            if st.button(f"🔥 錯 2 次以上 ({len(wrong2_df)} 字)", use_container_width=True):
+                if wrong2_df.empty:
+                    st.success("沒有重複錯的單字！")
+                else:
+                    start_practice(wrong2_df, shuffle=False)
+
+        # 4. 🎯 自選練習與 📊 錯題分析
+        col_pick, col_ana = st.columns(2)
+        with col_pick:
+            if st.button("🎯 自選練習（挑日期／挑單字）", use_container_width=True):
+                st.session_state.page = 'picker'
+                st.rerun()
+        with col_ana:
+            if st.button("📊 錯題分析", use_container_width=True):
+                st.session_state.page = 'analysis'
+                st.rerun()
+
+        # 5. 🏷️ 專項主題與克漏字
         st.write("")
         tags = df['Tag'].unique().tolist()
         selected_tag = st.selectbox("選擇特定主題進行特訓：", tags)
-        
+
         col_tag, col_cloze = st.columns(2)
         with col_tag:
             if st.button(f"📚 {selected_tag} 單字卡", use_container_width=True):
-                tag_df = df[df['Tag'] == selected_tag]
-                st.session_state.practice_cards = tag_df.to_dict('records')
-                st.session_state.current_index = 0
-                st.session_state.is_front = True
-                st.session_state.practice_mode = 'flashcard'
-                st.session_state.page = 'practice'
-                st.rerun()
-                
+                start_practice(df[df['Tag'] == selected_tag])
+
         with col_cloze:
             if st.button(f"🕳️ {selected_tag} 克漏字", use_container_width=True):
-                tag_df = df[df['Tag'] == selected_tag]
                 # 隨機挑選 10 題進行克漏字
-                sample_size = min(10, len(tag_df))
-                st.session_state.practice_cards = tag_df.sample(sample_size).to_dict('records')
-                st.session_state.current_index = 0
-                st.session_state.is_front = True
-                st.session_state.practice_mode = 'cloze'
-                st.session_state.page = 'practice'
-                st.rerun()
+                start_practice(df[df['Tag'] == selected_tag], mode='cloze', limit=10)
 
     st.write("---")
     st.subheader("🔄 資料管線")
@@ -298,7 +341,163 @@ def render_menu():
             st.rerun()
 
 # ==========================================
-# 8. 測驗介面 (相容 Flashcard 與 Cloze)
+# 8. 🎯 自選練習 (依匯入日期／主題／錯題篩選，再逐字勾選)
+# ==========================================
+def render_picker():
+    st.button("⬅️ 返回首頁", on_click=go_to_menu)
+    st.title("🎯 自選練習")
+
+    try:
+        df = fetch_and_clean_data()
+    except Exception as e:
+        st.error(f"讀取資料庫失敗：{e}")
+        return
+    if df.empty:
+        st.warning("字庫是空的，先去新增單字吧！")
+        return
+
+    # --- 篩選條件 ---
+    date_counts = df['Created_Date'].value_counts().sort_index(ascending=False)
+    picked_dates = st.multiselect(
+        "📆 匯入日期（可複選，留空 = 全部）：",
+        date_counts.index.tolist(),
+        format_func=lambda d: f"{d}（{date_counts[d]} 字）")
+
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        picked_tags = st.multiselect("🏷️ 主題（留空 = 全部）：", sorted(df['Tag'].unique().tolist()))
+    with col_f2:
+        keyword = st.text_input("🔍 搜尋單字或翻譯：")
+    only_wrong = st.checkbox("❌ 只看待複習的錯題（錯過且尚未精熟）")
+
+    view = df
+    if picked_dates:
+        view = view[view['Created_Date'].isin(picked_dates)]
+    if picked_tags:
+        view = view[view['Tag'].isin(picked_tags)]
+    if only_wrong:
+        view = view[view['Open_Wrong']]
+    if keyword.strip():
+        kw = keyword.strip()
+        view = view[view['Word'].astype(str).str.contains(kw, case=False, regex=False) |
+                    view['Translation'].astype(str).str.contains(kw, case=False, regex=False)]
+
+    st.caption(f"符合條件：{len(view)} 字。勾選想練的單字；都不勾 = 練整個篩選結果。")
+
+    # --- 勾選清單 ---
+    table = view[['Word', 'Translation', 'Tag', 'Wrong', 'Level', 'Created_Date']].copy()
+    table.insert(0, '選取', False)
+    edited = st.data_editor(
+        table, hide_index=True, use_container_width=True, height=380,
+        disabled=['Word', 'Translation', 'Tag', 'Wrong', 'Level', 'Created_Date'],
+        column_config={
+            '選取': st.column_config.CheckboxColumn('選取'),
+            'Word': '單字', 'Translation': '翻譯', 'Tag': '主題',
+            'Wrong': '錯', 'Level': '等級', 'Created_Date': '匯入日',
+        })
+
+    chosen = view.loc[edited[edited['選取']].index] if edited['選取'].any() else view
+    st.write(f"**即將練習：{len(chosen)} 字**")
+    col_p1, col_p2 = st.columns(2)
+    with col_p1:
+        if st.button("🃏 開始單字卡", type="primary", use_container_width=True):
+            if chosen.empty:
+                st.warning("沒有符合條件的單字。")
+            else:
+                start_practice(chosen)
+    with col_p2:
+        if st.button("🕳️ 開始克漏字", use_container_width=True):
+            if chosen.empty:
+                st.warning("沒有符合條件的單字。")
+            else:
+                start_practice(chosen, mode='cloze')
+
+# ==========================================
+# 9. 📊 錯題分析 (參考 ai-review 的學習分析：精熟率、最常錯、主題與日期弱點)
+# ==========================================
+def render_analysis():
+    st.button("⬅️ 返回首頁", on_click=go_to_menu)
+    st.title("📊 錯題分析")
+
+    try:
+        df = fetch_and_clean_data()
+    except Exception as e:
+        st.error(f"讀取資料庫失敗：{e}")
+        return
+    if df.empty:
+        st.warning("字庫是空的，先去新增單字吧！")
+        return
+
+    wrong_all = df[df['Wrong'] > 0]
+    open_df = df[df['Open_Wrong']].sort_values('Wrong', ascending=False)
+    mastered = wrong_all[wrong_all['Mastered']]
+    pct = round(100 * len(mastered) / len(wrong_all)) if len(wrong_all) else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("曾錯過的字", len(wrong_all))
+    c2.metric("已精熟 ✅", len(mastered))
+    c3.metric("待複習 ❌", len(open_df))
+    c4.metric("錯題精熟率", f"{pct}%")
+    st.progress(pct / 100)
+
+    # 快速特訓入口
+    low_acc = df[(df['Attempts'] >= 2) & (df['Accuracy'] < 50)]
+    col_q1, col_q2 = st.columns(2)
+    with col_q1:
+        if st.button(f"❌ 練全部待複習錯題 ({len(open_df)} 字)", type="primary", use_container_width=True):
+            if open_df.empty:
+                st.success("沒有待複習的錯題！")
+            else:
+                start_practice(open_df, shuffle=False)
+    with col_q2:
+        if st.button(f"📉 練答對率 <50% ({len(low_acc)} 字)", use_container_width=True):
+            if low_acc.empty:
+                st.success("沒有答對率過低的單字！")
+            else:
+                start_practice(low_acc)
+
+    # 最常錯 Top 10
+    st.write("---")
+    st.subheader("🔥 最常錯的單字")
+    if wrong_all.empty:
+        st.info("還沒有錯題紀錄，繼續保持！")
+    else:
+        top = wrong_all.sort_values(['Wrong', 'Correct'], ascending=[False, True]).head(10)
+        show = top[['Word', 'Translation', 'Wrong', 'Correct', 'Accuracy', 'Level', 'Created_Date']].copy()
+        show['Accuracy'] = show['Accuracy'].map(lambda a: '—' if pd.isna(a) else f"{int(a)}%")
+        show['狀態'] = top['Mastered'].map(lambda m: '✅ 已精熟' if m else '❌ 待複習')
+        show.columns = ['單字', '翻譯', '錯', '對', '答對率', '等級', '匯入日', '狀態']
+        st.dataframe(show, hide_index=True, use_container_width=True)
+
+    # 依主題
+    st.write("---")
+    st.subheader("🏷️ 依主題")
+    rows = []
+    for tag, g in df.groupby('Tag'):
+        att = int(g['Attempts'].sum())
+        acc = round(100 * g['Correct'].sum() / att) if att else None
+        open_n = int(g['Open_Wrong'].sum())
+        score = None if acc is None else max(0, min(100, acc - min(30, open_n * 5)))
+        rows.append({'主題': tag, '字數': len(g), '待複習錯題': open_n,
+                     '答對率': '—' if acc is None else f"{acc}%", '狀態': status_of(score)})
+    rows.sort(key=lambda r: -r['待複習錯題'])
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    # 依匯入日期
+    st.write("---")
+    st.subheader("📆 依匯入日期")
+    rows = []
+    for d, g in sorted(df.groupby('Created_Date'), key=lambda kv: kv[0], reverse=True):
+        att = int(g['Attempts'].sum())
+        acc = round(100 * g['Correct'].sum() / att) if att else None
+        rows.append({'匯入日': d, '字數': len(g), '待複習錯題': int(g['Open_Wrong'].sum()),
+                     '答對率': '—' if acc is None else f"{acc}%",
+                     '尚未練過': int((g['Attempts'] == 0).sum())})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.caption("想練某一天匯入的單字 → 「🎯 自選練習」用匯入日期篩選。")
+
+# ==========================================
+# 10. 測驗介面 (相容 Flashcard 與 Cloze)
 # ==========================================
 def render_practice():
     cards = st.session_state.practice_cards
@@ -383,8 +582,10 @@ def render_practice():
                 st.rerun()
 
 # ==========================================
-# 9. 路由導航
+# 11. 路由導航
 # ==========================================
 if st.session_state.page == 'menu': render_menu()
 elif st.session_state.page == 'practice': render_practice()
+elif st.session_state.page == 'picker': render_picker()
+elif st.session_state.page == 'analysis': render_analysis()
 elif st.session_state.page == 'add_word': render_add_word()
