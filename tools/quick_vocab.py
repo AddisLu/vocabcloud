@@ -611,6 +611,7 @@ class VocabWindow:
         self._setup_macos()
         self._setup_speech()
         self._setup_fn_key()
+        self._warm_speech()
 
     def _setup_fn_key(self):
         """單按 fn 加入單字庫。Tk 收不到單獨的 fn，改用 NSEvent 本機監聽
@@ -693,13 +694,26 @@ class VocabWindow:
         except Exception:
             self.synth = None
 
+    def _warm_speech(self):
+        """語音保溫。實測：第一次唸要 ~800ms（載入語音），之後 ~60ms；
+        閒置 50 秒會回升到 ~200ms。所以啟動時先用音量 0 唸一個真字把語音載進來，
+        之後每 30 秒再靜音唸一次維持熱度（正在唸真字時跳過這輪）。"""
+        try:
+            if self.synth is not None and not self.synth.isSpeaking():
+                self.synth.setVolume_(0.0)
+                self.synth.startSpeakingString_("warm up")
+        except Exception:
+            pass
+        self.root.after(30_000, self._warm_speech)
+
     def _speak(self, text, audio_url=""):
         if audio_url:  # 有真人 mp3 → 交給子程序下載播放
             play_pronunciation(text, audio_url)
             return
         if self.synth is not None:
             try:
-                self.synth.stopSpeaking()
+                self.synth.stopSpeaking()   # 可能正在靜音保溫
+                self.synth.setVolume_(1.0)
                 self.synth.startSpeakingString_(text)
                 return
             except Exception:
