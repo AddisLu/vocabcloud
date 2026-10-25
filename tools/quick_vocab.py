@@ -1172,6 +1172,8 @@ def serve():
                     win.root.after(0, show_from_clipboard)
                 elif data == "DISMISS":  # 等同按 Esc（測試用）
                     win.root.after(0, win.dismiss)
+                elif data == "TAP":      # 等同四指輕點（測試用）
+                    tap_hits.append(1)
                 elif data:
                     win.root.after(0, win.show, data)
             except Exception:
@@ -1216,11 +1218,38 @@ def serve():
             CGEventSetFlags(e, kCGEventFlagMaskCommand)
             CGEventPost(kCGHIDEventTap, e)
 
+    ax_state = {"trusted": False, "nagged_at": 0.0}
+
+    def ax_trusted():
+        try:
+            from ApplicationServices import AXIsProcessTrusted
+            return bool(AXIsProcessTrusted())
+        except Exception:
+            return True  # 查不到就當有，讓 ⌘C 試試看
+
+    def watch_ax():  # 每 3 秒看一次；使用者一給權限就生效，不必重啟 daemon
+        t = ax_trusted()
+        if t != ax_state["trusted"]:
+            ax_state["trusted"] = t
+            _dbg(f"accessibility trusted={t}")
+            if t:
+                notify("VocabCloud", "已取得輔助使用權限，四指輕點可以用了")
+        win.root.after(3000, watch_ax)
+
     def on_native_tap():
         if not dedupe():
             return
         now = _time.time()
         _dbg("4-finger tap (native)")
+        if not ax_state["trusted"] and not ax_trusted():
+            # 沒權限時 ⌘C 會被系統默默丟掉；直接說清楚並打開設定頁，不要誤報「沒選到字」
+            if now - ax_state["nagged_at"] > 20:
+                ax_state["nagged_at"] = now
+                notify("VocabCloud", "Python 還沒有「輔助使用」權限，無法送出 ⌘C。"
+                                     "請在設定頁把 Python 打開")
+                subprocess.Popen(["open", "x-apple.systempreferences:"
+                                  "com.apple.preference.security?Privacy_Accessibility"])
+            return
         base = pasteboard.changeCount() if pasteboard is not None else None
         try:
             send_cmd_c()
@@ -1248,13 +1277,15 @@ def serve():
         if n_dev:
             win._tap_detector = det  # 保住參照
             check_tap()
-            try:  # 沒有輔助使用權限就跳系統提示（只會問一次）
+            try:  # 沒有輔助使用權限就跳系統提示（系統只會問一次，之後要手動到設定頁開）
                 from ApplicationServices import (AXIsProcessTrustedWithOptions,
                                                  kAXTrustedCheckOptionPrompt)
-                _dbg(f"accessibility trusted="
-                     f"{AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})}")
+                ax_state["trusted"] = bool(
+                    AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}))
             except Exception as e:
                 _dbg(f"accessibility check failed: {e}")
+            _dbg(f"accessibility trusted={ax_state['trusted']}")
+            win.root.after(3000, watch_ax)
     except Exception as e:
         _dbg(f"native tap detector failed: {e}")
 
