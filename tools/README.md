@@ -37,7 +37,7 @@ launchctl kickstart -k gui/$(id -u)/com.vocabcloud.quickvocab
 2. 右鍵 → **服務** → **VocabCloud 查單字**（或用下面設定的快捷鍵）
 3. 浮動視窗顯示：音標、中文翻譯、詞性、英中釋義、例句，並自動唸一次
 4. 視窗內快速鍵：**空白鍵** 重播發音、**G** 用瀏覽器開 Google 翻譯（翻譯怪怪的時候）、
-   **單按 fn**（或 A、⏎）加入單字庫並自動關窗、
+   **單按 fn**（或 A、⏎）加入單字庫並自動關窗（按鍵看硬體鍵碼，注音輸入法下也能用）、
    **Esc** 關閉，**點視窗外任何地方也會自動關閉**（點回原 App 時焦點直接回去）
 5. 按「➕ 加入單字庫」後到 VocabCloud 網頁按「☁️ Drive 同步」匯入（重複的字會自動擋掉）
 
@@ -103,7 +103,9 @@ python3 -m pip install --user --break-system-packages opencc-python-reimplemente
 
 ## 資料來源
 
-- **翻譯/音標/詞性/釋義：本機 [ECDICT](https://github.com/skywind3000/ECDICT) 離線字典（毫秒級，開窗即顯示）**，簡轉繁用 zhconv
+- **翻譯/音標/詞性/釋義：本機 [ECDICT](https://github.com/skywind3000/ECDICT) 離線字典（毫秒級，開窗即顯示）**，簡轉繁用 OpenCC；
+  變化形（courses、running）一律用原形的翻譯（ECDICT 的變化形條目常只有冷僻義）
+- 單字同時在背景向 Google 翻譯取第二意見，約 0.1 秒後多顯示一行「🌐 Google：…」供對照
 - 例句＋真人發音 mp3：[dictionaryapi.dev](https://dictionaryapi.dev/)（背景補上，服務不穩就略過）
 - 本機查不到的字/片語才走網路：翻譯以 Google 免金鑰端點優先、MyMemory 備援；[Datamuse](https://www.datamuse.com/api/) + [MyMemory](https://mymemory.translated.net/doc/spec.php)
 - 發音：開窗自動唸一次（系統 TTS），按「🔊 發音」重播（有真人 mp3 就播 mp3）

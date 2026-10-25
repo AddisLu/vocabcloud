@@ -144,11 +144,18 @@ def local_lookup(word):
 
         def q(w):
             return cur.execute(
-                "SELECT word, phonetic, translation, definition FROM stardict "
+                "SELECT word, phonetic, translation, definition, exchange FROM stardict "
                 "WHERE word = ? COLLATE NOCASE", (w,)
             ).fetchone()
 
         row = q(word)
+        if row and row[4] and "0:" in row[4]:
+            # 變化形（courses、running）在 ECDICT 常只有冷僻義（courses → [醫]月經），
+            # 改用原形的翻譯與釋義，音標保留變化形自己的
+            lemma = dict(p.split(":", 1) for p in row[4].split("/") if ":" in p).get("0")
+            base = q(lemma) if lemma else None
+            if base and (base[2] or "").strip():
+                row = (row[0], row[1], base[2], base[3], row[4])
         if not row:  # 試著還原常見字尾變化
             lw = word.lower()
             for suf, rep in (("ies", "y"), ("es", ""), ("s", ""), ("ing", ""),
@@ -240,13 +247,15 @@ def derive_phonetic(word):
 
 def _row_to_info(row):
     """把 ECDICT 的一列轉成 info dict（共用於單字查詢與片語偵測）。"""
-    w, phonetic, translation, definition = row
+    w, phonetic, translation, definition = row[:4]
     info = {"word": w, "phonetic": "", "pos": "", "definition": "", "translation": ""}
     phonetic = (phonetic or "").strip() or derive_phonetic(w)
     if phonetic:
         info["phonetic"] = f"[{phonetic}]"
 
     trans_lines = [l.strip() for l in (translation or "").splitlines() if l.strip()]
+    # 帶領域標籤的義項（[醫]、[計]、[化]…）排到後面，一般義優先
+    trans_lines.sort(key=lambda l: bool(re.match(r"^([a-z]+\.\s*)?\[", l)))
     if trans_lines:
         m = re.match(r"([a-z]+)\.\s*(.*)", trans_lines[0])
         if m:
@@ -595,6 +604,7 @@ class VocabWindow:
         self.trans_var = tk.StringVar()
         self.def_var = tk.StringVar()
         self.ex_var = tk.StringVar()
+        self.google_var = tk.StringVar()
         self.status_var = tk.StringVar()
 
         # 按鈕與狀態列先 pack 在底部：空間不夠時優先保住按鈕，不會被截掉
@@ -625,14 +635,27 @@ class VocabWindow:
                  wraplength=WRAP, justify="left").pack(anchor="w", pady=(6, 0))
         tk.Label(root, textvariable=self.ex_var, font=("Helvetica", 13), fg="#2563eb",
                  wraplength=WRAP, justify="left").pack(anchor="w", pady=(6, 0))
+        tk.Label(root, textvariable=self.google_var, font=("Helvetica", 14), fg="#6b7280",
+                 wraplength=WRAP, justify="left").pack(anchor="w", pady=(6, 0))
 
-        root.bind("<Escape>", lambda e: self.dismiss())
-        root.bind("<Return>", lambda e: self.on_add())
-        root.bind("a", lambda e: self.on_add())      # 左手無名指原位
-        root.bind("A", lambda e: self.on_add())
-        root.bind("<space>", lambda e: self.on_play())
-        root.bind("g", lambda e: self.on_google())
-        root.bind("G", lambda e: self.on_google())
+        # 快速鍵主要由 NSEvent 鍵碼監聽處理（不受輸入法影響）；
+        # 這些 Tk 綁定只在監聽沒裝起來時當備援，否則會觸發兩次
+        self._keys_native = False
+
+        def tk_key(action):
+            def h(_e):
+                if not self._keys_native:
+                    {"add": self.on_add, "google": self.on_google, "play": self.on_play,
+                     "dismiss": self.dismiss}[action]()
+            return h
+
+        root.bind("<Escape>", tk_key("dismiss"))
+        root.bind("<Return>", tk_key("add"))
+        root.bind("a", tk_key("add"))      # 左手無名指原位
+        root.bind("A", tk_key("add"))
+        root.bind("<space>", tk_key("play"))
+        root.bind("g", tk_key("google"))
+        root.bind("G", tk_key("google"))
         root.bind("<FocusOut>", self._on_focus_out)  # 點視窗外面 → 自動關閉
         root.protocol("WM_DELETE_WINDOW", self.dismiss)
 
@@ -647,6 +670,7 @@ class VocabWindow:
         監聽回呼發生在 Tk 處理事件途中，回呼裡碰 tkinter 會讓直譯器崩潰，
         所以回呼只記下來，由 Tk 每 10ms 檢查。"""
         self.fn_hits = []
+        self.key_hits = []
         state = {"down_at": None, "clean": False}
         try:
             from AppKit import NSEvent
@@ -654,11 +678,19 @@ class VocabWindow:
             FN_FLAG = 1 << 23            # NSEventModifierFlagFunction
             KEYCODE_FN = 63              # kVK_Function
             MASK = (1 << 12) | (1 << 10)  # FlagsChanged | KeyDown
+            # 視窗內快速鍵改看「硬體鍵碼」：注音等輸入法會把字母鍵攔去組字，
+            # Tk 的 "g"/"a" 綁定永遠收不到。鍵碼不經輸入法。
+            KEY_ACTIONS = {0: "add", 5: "google", 49: "play", 53: "dismiss", 36: "add"}
+            MOD_MASK = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20)  # ⇧⌃⌥⌘
 
             def handler(event):
                 try:
                     if event.type() == 10:  # KeyDown：fn 按住時按了別的鍵 → 是組合鍵
                         state["clean"] = False
+                        action = KEY_ACTIONS.get(event.keyCode())
+                        if action and not (event.modifierFlags() & MOD_MASK):
+                            self.key_hits.append(action)
+                            return None  # 吃掉，別再讓 Tk/輸入法處理
                     elif event.keyCode() == KEYCODE_FN:
                         if event.modifierFlags() & FN_FLAG:
                             state["down_at"], state["clean"] = time.time(), True
@@ -672,6 +704,7 @@ class VocabWindow:
 
             self._fn_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
                 MASK, handler)
+            self._keys_native = self._fn_monitor is not None
         except Exception as e:
             _dbg(f"fn monitor failed: {e}")
             return
@@ -682,6 +715,13 @@ class VocabWindow:
             self.fn_hits.clear()
             if self.root.state() == "normal":
                 self.on_add()
+        if self.key_hits:
+            actions = self.key_hits[:]
+            self.key_hits.clear()
+            if self.root.state() == "normal":
+                for a in actions:
+                    {"add": self.on_add, "google": self.on_google, "play": self.on_play,
+                     "dismiss": self.dismiss}[a]()
         self.root.after(10, self._poll_fn)
 
     # ---------- macOS 視窗層級：跨 Space、蓋過全螢幕 App ----------
@@ -763,6 +803,7 @@ class VocabWindow:
         self.trans_var.set("查詢中…")
         self.def_var.set("")
         self.ex_var.set("")
+        self.google_var.set("")
         self.status_var.set("")
         self.add_btn.config(state="disabled", text="➕ 加入單字庫 (fn)")
         # 片語/整句：縮小標題字體
@@ -813,6 +854,16 @@ class VocabWindow:
                             self._post_fill(info, gen)
                     except Exception:
                         pass
+                # Google 翻譯並行取得（~60-130ms），多顯示一行供對照；本機翻譯仍即時先出
+                def google_line():
+                    try:
+                        zh = _google_translate(word)
+                        if zh and zh.strip().lower() != word.strip().lower():
+                            self._post_fill({**info, "google_zh": to_traditional(zh)}, gen)
+                    except Exception:
+                        pass
+
+                threading.Thread(target=google_line, daemon=True).start()
                 try:  # 背景補例句與真人發音
                     da = fetch_dictapi(urllib.parse.quote(info["word"]))
                     info = dict(info)
@@ -860,6 +911,8 @@ class VocabWindow:
             if info.get("example_zh"):
                 ex += f"\n{info['example_zh']}"
             self.ex_var.set(ex)
+        if info.get("google_zh"):
+            self.google_var.set(f"🌐 Google：{info['google_zh']}")
         self.add_btn.config(state="normal")
         self._place()  # 內容變多視窗會長高，重新調整避免超出螢幕
         if self.pending_add:  # 資料還沒好時使用者就按了 ⌘ → 現在自動完成加入
