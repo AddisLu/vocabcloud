@@ -1020,7 +1020,7 @@ def _setup_status_item(state):
                 self.item.button().setAppearsDisabled_(not on)
             except Exception:
                 self.item.button().setTitle_("📖" if on else "📕")
-            self.toggle_item.setTitle_("停用查單字" if on else "啟用查單字")
+            # 標準勾選框語意：文字固定，打勾 = 目前啟用；點一下切換
             self.toggle_item.setState_(1 if on else 0)
 
         def toggle_(self, sender):
@@ -1060,7 +1060,7 @@ def _setup_status_item(state):
     hdr = add("VocabCloud 查單字", None)
     hdr.setEnabled_(False)
     menu.addItem_(NSMenuItem.separatorItem())
-    ctl.toggle_item = add("停用查單字", "toggle:")
+    ctl.toggle_item = add("啟用查單字", "toggle:")
     menu.addItem_(NSMenuItem.separatorItem())
     add("開啟今天的單字檔", "openVocab:")
     add("查看紀錄", "openLog:")
