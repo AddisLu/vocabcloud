@@ -54,8 +54,9 @@ macOS 服務機制本身每次要 ~1 秒啟動，BTT 直接執行可以壓到 ~0
   `/opt/homebrew/bin/python3 /Users/yourulyu/coding/vocabcloud/tools/quick_vocab.py "$(pbpaste)"`
 
 觸發方式：**四指輕點**，由 daemon 自己偵測（`tools/mt_tap.py`，讀 macOS 私有框架
-MultitouchSupport 的原始觸控資料，即 BTT 的底層方法，不需權限）。偵測到後 daemon 自己送 ⌘C
-（CGEvent），這一步需要給 **Python 輔助使用權限**（首次啟動會跳系統提示；若錯過：
+MultitouchSupport 的原始觸控資料，即 BTT 的底層方法，不需權限）。偵測到後先用輔助使用 API
+直接讀前景 App 的選取文字（不碰剪貼簿）；該 App 不支援時才退回送 ⌘C 讀剪貼簿。
+兩者都需要給 **Python 輔助使用權限**（首次啟動會跳系統提示；若錯過：
 系統設定 → 隱私權與安全性 → 輔助使用 → 加入 Python）。不再依賴 BTT。
 
 診斷：`python3 tools/mt_tap.py` 後在觸控板四指輕點，會印出偵測結果。

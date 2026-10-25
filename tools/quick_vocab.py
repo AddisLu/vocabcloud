@@ -1236,11 +1236,38 @@ def serve():
                 notify("VocabCloud", "已取得輔助使用權限，四指輕點可以用了")
         win.root.after(3000, watch_ax)
 
+    def ax_selected_text():
+        """用輔助使用 API 直接讀前景 App 的選取文字（約 1~5ms，不碰剪貼簿）。
+        不支援的 App（部分 Electron/網頁元件）會回傳空字串，呼叫端退回 ⌘C。"""
+        try:
+            from ApplicationServices import (
+                AXUIElementCopyAttributeValue, AXUIElementCreateSystemWide,
+                kAXFocusedApplicationAttribute, kAXFocusedUIElementAttribute,
+                kAXSelectedTextAttribute)
+            err, app = AXUIElementCopyAttributeValue(
+                AXUIElementCreateSystemWide(), kAXFocusedApplicationAttribute, None)
+            if err or app is None:
+                return ""
+            err, el = AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute, None)
+            if err or el is None:
+                return ""
+            err, text = AXUIElementCopyAttributeValue(el, kAXSelectedTextAttribute, None)
+            return str(text) if not err and text else ""
+        except Exception as e:
+            _dbg(f"AX read failed: {e}")
+            return ""
+
     def on_native_tap():
         if not dedupe():
             return
         now = _time.time()
         _dbg("4-finger tap (native)")
+        text = ax_selected_text()
+        if text.strip():
+            _dbg(f"AX selected text in {(_time.time() - now) * 1000:.0f}ms: {text[:30]!r}")
+            win.show(text)
+            return
+        _dbg("AX gave nothing → fallback ⌘C")
         if not ax_state["trusted"] and not ax_trusted():
             # 沒權限時 ⌘C 會被系統默默丟掉；直接說清楚並打開設定頁，不要誤報「沒選到字」
             if now - ax_state["nagged_at"] > 20:
