@@ -63,19 +63,20 @@ def google_lookup(text, timeout=5):
     zh = "".join(seg[0] for seg in (data[0] or []) if seg and seg[0]).strip()
     if zh and zh.lower() != text.strip().lower():
         out["translation"] = zh
+    # 詞性/釋義以 md（釋義清單）第一條為準，那才是主要義；bd（譯法清單）的順序不可靠
+    # （separate：md 第一條是形容詞，bd 第一條卻是「成套服裝單品」的名詞）
     pos_en = ""
+    md = data[12] if len(data) > 12 else None
+    if md and md[0] and md[0][1]:
+        pos_en = md[0][0] or ""
+        out["pos"] = POS_ZH.get(pos_en, pos_en)
+        out["definition"] = md[0][1][0][0]
     bd = data[1] if len(data) > 1 else None
     if bd:
-        pos_en = bd[0][0] or ""
-        out["pos"] = POS_ZH.get(pos_en, pos_en)
-        out["alternatives"] = [t for t in (bd[0][1] or [])[:5] if t and t != out["translation"]][:4]
-    md = data[12] if len(data) > 12 else None
-    if md:
-        entry = next((e for e in md if e and e[0] == pos_en), md[0])
-        if entry and entry[1]:
-            out["definition"] = entry[1][0][0]
-            if not out["pos"] and entry[0]:
-                out["pos"] = POS_ZH.get(entry[0], entry[0])
+        entry = next((e for e in bd if e and e[0] == pos_en), bd[0])
+        if not out["pos"] and entry[0]:
+            out["pos"] = POS_ZH.get(entry[0], entry[0])
+        out["alternatives"] = [t for t in (entry[1] or [])[:5] if t and t != out["translation"]][:4]
     return out
 
 
@@ -94,6 +95,50 @@ def wiktionary_example(phrase):
                 if s:
                     return s
     return ""
+
+
+TTS_DIR = DATA_DIR / "tts"
+
+
+def google_tts_path(text):
+    import hashlib
+    key = hashlib.md5(text.strip().lower().encode("utf-8")).hexdigest()[:16]
+    return TTS_DIR / f"{key}.mp3"
+
+
+def google_tts(text, timeout=3):
+    """Google 翻譯的 TTS 端點（網頁上喇叭的聲音）。抓回 mp3 存快取，回傳路徑。"""
+    path = google_tts_path(text)
+    if path.exists():
+        return path
+    TTS_DIR.mkdir(parents=True, exist_ok=True)
+    q = urllib.parse.quote(text.strip())
+    req = urllib.request.Request(
+        f"https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en&q={q}",
+        headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read()
+    if not data or len(data) < 500:
+        raise RuntimeError("empty tts response")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+    return path
+
+
+_mp3_proc = None
+
+
+def _play_mp3(path):
+    """afplay 播 mp3（音訊裝置由保溫迴圈維持在喚醒狀態，起播 ~30ms）。重播會先停掉上一個。"""
+    global _mp3_proc
+    try:
+        if _mp3_proc and _mp3_proc.poll() is None:
+            _mp3_proc.terminate()
+    except Exception:
+        pass
+    _mp3_proc = subprocess.Popen(["afplay", str(path)], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
 
 
 def tatoeba_example(word):
@@ -230,6 +275,41 @@ def find_phrases(text, limit=3):
     return out
 
 
+_ARPABET = {
+    "AA": "ɑ", "AE": "æ", "AH": "ʌ", "AO": "ɔ", "AW": "aʊ", "AY": "aɪ", "EH": "ɛ", "ER": "ɜr",
+    "EY": "eɪ", "IH": "ɪ", "IY": "i", "OW": "oʊ", "OY": "ɔɪ", "UH": "ʊ", "UW": "u",
+    "B": "b", "CH": "tʃ", "D": "d", "DH": "ð", "F": "f", "G": "ɡ", "HH": "h", "JH": "dʒ",
+    "K": "k", "L": "l", "M": "m", "N": "n", "NG": "ŋ", "P": "p", "R": "r", "S": "s",
+    "SH": "ʃ", "T": "t", "TH": "θ", "V": "v", "W": "w", "Y": "j", "Z": "z", "ZH": "ʒ",
+}
+
+
+def arpabet_to_ipa(pron):
+    """CMU ARPAbet → 常見字典風格 IPA，重音符放在音節開頭（Datamuse 自己轉的會放錯位）。
+    'S EH1 P ER0 EY0 T' → 'ˈsɛpəreɪt'"""
+    phones = pron.split()
+    out, onset = [], []  # onset：上一個母音之後累積的子音，遇到母音時決定重音符要放在它們前面
+    for ph in phones:
+        m = re.match(r"([A-Z]+)(\d)?$", ph)
+        if not m:
+            continue
+        base, stress = m.group(1), m.group(2)
+        if stress is None:  # 子音
+            onset.append(_ARPABET.get(base, base.lower()))
+            continue
+        if base == "AH" and stress == "0":
+            sym = "ə"
+        elif base == "ER":
+            sym = "ər" if stress == "0" else "ɜr"
+        else:
+            sym = _ARPABET.get(base, base.lower())
+        mark = {"1": "ˈ", "2": "ˌ"}.get(stress, "")
+        out.append(mark + "".join(onset) + sym)
+        onset = []
+    out.append("".join(onset))
+    return "".join(out)
+
+
 def fetch_datamuse(q):
     """主要來源：Datamuse（音標/詞性/釋義），穩定。"""
     out = {"phonetic": "", "pos": "", "definition": ""}
@@ -238,10 +318,11 @@ def fetch_datamuse(q):
     )
     if results:
         r = results[0]
-        for tag in r.get("tags", []):
-            if tag.startswith("ipa_pron:"):
-                out["phonetic"] = f"/{tag.split(':', 1)[1].strip()}/"
-                break
+        tags = {t.split(":", 1)[0]: t.split(":", 1)[1].strip() for t in r.get("tags", []) if ":" in t}
+        if tags.get("pron"):
+            out["phonetic"] = f"/{arpabet_to_ipa(tags['pron'])}/"
+        elif tags.get("ipa_pron"):
+            out["phonetic"] = f"/{tags['ipa_pron']}/"
         defs = r.get("defs", [])
         if defs:
             pos, _, d = defs[0].partition("\t")
@@ -599,16 +680,48 @@ class VocabWindow:
         self.speech.ensure()  # 立刻啟動並預熱
 
     def _speak(self, text, audio_url=""):
-        if audio_url:  # 有真人 mp3 → 交給子程序下載播放
-            play_pronunciation(text, audio_url)
+        """發音：Google TTS（較自然）。有快取立刻播；沒有就背景抓（~200ms），
+        0.9 秒內沒抓到改用常駐 Samantha，抓到的仍存快取供下次用。"""
+        import threading
+
+        self._speak_seq = getattr(self, "_speak_seq", 0) + 1
+        seq = self._speak_seq
+        cached = google_tts_path(text)
+        if cached.exists():
+            _play_mp3(cached)
+            _dbg(f"speak (cached google tts): {text[:20]!r}")
             return
-        try:
-            self.speech.speak(text)
-            _dbg(f"speak sent: {text[:20]!r}")
-            return
-        except Exception as e:
-            _dbg(f"speech server failed: {e}")
-        play_pronunciation(text)  # 備援：say
+        state = {"spoken": False}
+        slock = threading.Lock()
+
+        def fallback():
+            with slock:
+                if state["spoken"] or seq != self._speak_seq:
+                    return
+                state["spoken"] = True
+            try:
+                self.speech.speak(text)
+                _dbg(f"speak (samantha fallback): {text[:20]!r}")
+            except Exception as e:
+                _dbg(f"speech server failed: {e}")
+                play_pronunciation(text)
+
+        def fetch():
+            try:
+                path = google_tts(text)
+            except Exception as e:
+                _dbg(f"google tts failed: {e}")
+                fallback()
+                return
+            with slock:
+                if state["spoken"] or seq != self._speak_seq:
+                    return  # 已用 Samantha 唸過，或已換字；mp3 留作快取
+                state["spoken"] = True
+            _play_mp3(path)
+            _dbg(f"speak (google tts): {text[:20]!r}")
+
+        threading.Thread(target=fetch, daemon=True).start()
+        self.root.after(900, fallback)
 
     def _order_front(self, activate=True):
         """activate=False：只浮到最上層、不搶焦點（BTT 的 ⌘C 還要送到原 App）。"""
@@ -746,13 +859,11 @@ class VocabWindow:
                 finally:
                     done()
 
-            def extra():  # 真人發音 + 較標準音標（dictionaryapi.dev，常掛就算了）
+            def extra():  # 較標準的音標（dictionaryapi.dev，常掛就算了；發音已改用 Google TTS）
                 try:
                     da = fetch_dictapi(q)
-                    fields = {"audio_url": da["audio_url"]}
                     if da["phonetic"]:
-                        fields["phonetic"] = da["phonetic"]
-                    merge(**fields)
+                        merge(phonetic=da["phonetic"])
                 except Exception:
                     pass
                 finally:

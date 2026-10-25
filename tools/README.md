@@ -106,4 +106,6 @@ cp -R "tools/VocabCloud 查單字.workflow" ~/Library/Services/
 - 例句：單字由 Google 一併帶回（dt=ex）；片語卡若你選的只是片語本身，向 Wiktionary 要例句（~1s 背景）；
   你選的是含上下文的句子時，直接拿那句當片語的例句
 - 真人發音 mp3／備用例句：[dictionaryapi.dev](https://dictionaryapi.dev/)（服務不穩，抓不到就略過）
-- 發音：常駐語音子程序（Samantha），開窗即唸；按「🔊」重播，有真人 mp3 就播 mp3
+- 發音：**Google 翻譯 TTS**（網頁喇叭的聲音，~200ms 取得，mp3 快取在 tools/data/tts/，同字再查即播）；
+  0.9 秒內沒抓到改用常駐 Samantha 語音子程序。按「🔊」重播
+- 音標：Datamuse 的 ARPAbet 自行轉成字典風格 IPA（重音符在音節開頭，如 /ˈsɛpəreɪt/）
